@@ -1180,6 +1180,132 @@ def generate_digest_paragraph(mc: dict) -> str:
     return para
 
 
+def render_chart_to_b64(mc: dict) -> str:
+    """
+    Renders the 'Most Probable Exact Matchups' horizontal bar chart to a
+    base64-encoded PNG string suitable for inline embedding in an HTML email.
+
+    Requires the `kaleido` package (already in requirements.txt).
+    Returns an empty string if rendering fails (e.g. kaleido not installed).
+    """
+    try:
+        fig = build_matchup_distribution(mc, top_n=12)
+        # Force full dark background for the email snapshot
+        fig.update_layout(
+            paper_bgcolor="#080f1c",
+            plot_bgcolor="#080f1c",
+            margin=dict(l=180, r=40, t=60, b=40),
+        )
+        img_bytes = fig.to_image(format="png", width=900, height=500, scale=2)
+        import base64
+        return base64.b64encode(img_bytes).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def generate_digest_email_html(mc: dict, paragraph: str) -> str:
+    """
+    Returns a full HTML email body containing:
+      - The daily brief paragraph (plain text section)
+      - The 'Most Probable Exact Matchups' bar chart as an inline PNG
+
+    Parameters
+    ----------
+    mc        : dict returned by run_monte_carlo()
+    paragraph : str  — the narrative paragraph (template or LLM-written)
+
+    Usage in send_digest.py
+    -----------------------
+    mc        = run_monte_carlo(n_sims=50_000)
+    context   = generate_digest_paragraph(mc)   # → LLM prompt context
+    paragraph = call_llm(context)               # or use context directly
+    html_body = generate_digest_email_html(mc, paragraph)
+
+    resend.Emails.send({
+        "from":    "match82@yourdomain.com",
+        "to":      subscriber_email,
+        "subject": f"Match 82 Brief — {today}",
+        "html":    html_body,
+    })
+    """
+    import datetime
+    today = datetime.date.today().strftime("%B %d, %Y")
+    b64 = render_chart_to_b64(mc)
+
+    chart_html = (
+        f'<img src="data:image/png;base64,{b64}" '
+        f'width="900" style="max-width:100%;border-radius:8px;margin-top:1.2rem;" '
+        f'alt="Most Probable Exact Matchups — Match 82" />'
+        if b64 else
+        '<p style="color:#64748b;font-size:0.8rem;">'
+        '[Chart unavailable — install kaleido: pip install kaleido]</p>'
+    )
+
+    # Convert markdown bold (**text**) to <strong> for email clients
+    import re
+    paragraph_html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
+    paragraph_html = paragraph_html.replace("\n\n", "</p><p>")
+
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Match 82 Brief — {today}</title>
+</head>
+<body style="margin:0;padding:0;background:#080f1c;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#080f1c;">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table width="640" cellpadding="0" cellspacing="0"
+             style="max-width:640px;background:#0e1628;border-radius:12px;
+                    border:1px solid #1e3a5f;overflow:hidden;">
+
+        <!-- Header -->
+        <tr><td style="background:#0d1b38;padding:24px 32px;
+                        border-bottom:1px solid #1e3a5f;">
+          <p style="margin:0;color:#475569;font-size:0.72rem;text-transform:uppercase;
+                    letter-spacing:0.1em;font-weight:700;">Match 82 · Lumen Field · July 1, 2026</p>
+          <h1 style="margin:6px 0 0;color:#f8fafc;font-size:1.35rem;font-weight:700;
+                     line-height:1.3;">Daily Odds Brief</h1>
+          <p style="margin:4px 0 0;color:#475569;font-size:0.82rem;">{today}</p>
+        </td></tr>
+
+        <!-- Body paragraph -->
+        <tr><td style="padding:28px 32px 8px;">
+          <p style="margin:0;color:#cbd5e1;font-size:0.95rem;line-height:1.85;">
+            {paragraph_html}
+          </p>
+        </td></tr>
+
+        <!-- Chart section -->
+        <tr><td style="padding:8px 32px 28px;">
+          <p style="margin:0 0 12px;color:#475569;font-size:0.72rem;text-transform:uppercase;
+                    letter-spacing:0.08em;font-weight:700;">Most Probable Exact Matchups</p>
+          {chart_html}
+          <p style="margin:10px 0 0;color:#334155;font-size:0.74rem;">
+            Probabilities from {mc.get('n_sims', 50000):,}-trial Dixon-Coles / Elo Monte Carlo simulation.
+          </p>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#060c18;border-top:1px solid #1e2a44;
+                        padding:16px 32px;">
+          <p style="margin:0;color:#334155;font-size:0.74rem;line-height:1.6;">
+            You're receiving this because you subscribed at the
+            <a href="https://match82-wc2026-tracker.streamlit.app" style="color:#3b82f6;">
+            Match 82 Tracker</a>. No spam, ever.
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+"""
+
+
 def save_email_signup(email: str) -> bool:
     """
     Persist a subscriber email to a local CSV file in the workspace.
@@ -1293,58 +1419,82 @@ def render_digest_section(mc: dict) -> None:
         with st.expander("🔧 Production wiring guide"):
             st.markdown(
                 """
-                **To send real emails**, wire these three components:
+                **To send real emails with the chart**, wire these three components:
 
-                **1. Scheduler** — GitHub Actions cron (free) or a cloud function:
+                **1. Scheduler** — GitHub Actions cron (free). Runs at 7 AM PT = 14:00 UTC.
+                The snapshot is taken at run time, so it reflects the previous evening's
+                final results once standings are updated in the app:
                 ```yaml
                 # .github/workflows/daily_digest.yml
                 on:
                   schedule:
-                    - cron: '0 14 * * *'  # 7 AM PT during group stage
+                    - cron: '0 14 * * *'  # 7 AM PT (UTC-7 during group stage)
                 jobs:
                   digest:
                     runs-on: ubuntu-latest
                     steps:
+                      - uses: actions/checkout@v4
+                      - uses: actions/setup-python@v5
+                        with: {{ python-version: '3.11' }}
+                      - run: pip install -r requirements.txt
                       - run: python send_digest.py
+                        env:
+                          OPENAI_API_KEY: ${{{{ secrets.OPENAI_API_KEY }}}}
+                          RESEND_API_KEY: ${{{{ secrets.RESEND_API_KEY }}}}
                 ```
 
-                **2. LLM writer** — `send_digest.py` calls `gpt-4o-mini`:
+                **2. `send_digest.py`** — runs MC, writes LLM paragraph, renders chart, sends HTML email:
                 ```python
-                import openai, json
-                from app import run_monte_carlo, generate_digest_paragraph
+                import os, datetime, openai, resend
+                from app import (
+                    run_monte_carlo,
+                    generate_digest_paragraph,
+                    generate_digest_email_html,
+                )
 
+                today = datetime.date.today().strftime("%B %d, %Y")
+
+                # --- 1. Run simulation (snapshot of this morning's standings) ---
                 mc = run_monte_carlo(n_sims=50_000)
-                context = generate_digest_paragraph(mc)  # structured context
 
+                # --- 2. Generate paragraph via gpt-4o-mini ---
+                context = generate_digest_paragraph(mc)  # structured context string
                 response = openai.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                      {"role": "system", "content": 
-                        "You are a sharp soccer analyst writing a 2-sentence daily "
+                      {{"role": "system", "content":
+                        "You are a sharp soccer analyst writing a 3-4 sentence daily "
                         "odds brief. Be specific about numbers. Sound like The Athletic, "
-                        "not ESPN. No hype."},
-                      {"role": "user", "content": context}
-                    ]
+                        "not ESPN. No hype. Plain text only, no markdown."}},
+                      {{"role": "user", "content": context}},
+                    ],
                 )
                 paragraph = response.choices[0].message.content
-                ```
 
-                **3. Email sender** — [Resend](https://resend.com) (free up to 3k/mo):
-                ```python
-                import resend
+                # --- 3. Build full HTML email with embedded chart image ---
+                html_body = generate_digest_email_html(mc, paragraph)
+                # (render_chart_to_b64 is called inside; requires kaleido)
+
+                # --- 4. Send to all subscribers via Resend ---
                 resend.api_key = os.environ["RESEND_API_KEY"]
-
-                for email in get_subscribers():  # read from DB / CSV
-                    resend.Emails.send({
-                      "from": "match82@yourdomain.com",
-                      "to": email,
-                      "subject": f"Match 82 Brief — {today}",
-                      "text": paragraph,
-                    })
+                subscribers = []  # replace with your DB / CSV read
+                for email in subscribers:
+                    resend.Emails.send({{
+                        "from":    "Match 82 Brief <match82@yourdomain.com>",
+                        "to":      email,
+                        "subject": f"Match 82 Brief — {{today}}",
+                        "html":    html_body,
+                    }})
+                print(f"Sent to {{len(subscribers)}} subscribers.")
                 ```
 
-                Total cost: **$0** for the scheduler + **~$0.001/digest** for the LLM
-                (at gpt-4o-mini pricing) + **$0** for email under 3k subscribers.
+                **Chart snapshot timing**: The cron runs at 7 AM PT, after you've updated
+                `LIVE_STANDINGS` in app.py with the previous day's final scores and pushed
+                to GitHub. The chart will reflect that morning's MC output — exactly what
+                changed overnight.
+
+                Total cost: **$0** for scheduler + **~$0.001/digest** (gpt-4o-mini) +
+                **$0** for email under 3k subscribers (Resend free tier).
                 """
             )
 
@@ -1361,6 +1511,18 @@ def render_digest_section(mc: dict) -> None:
             f'padding:1.4rem 1.6rem;line-height:1.85;font-size:0.88rem;color:#cbd5e1;">'
             f'{digest_text}'
             f'</div>',
+            unsafe_allow_html=True,
+        )
+        # Chart preview indicator
+        st.markdown(
+            '<div style="margin-top:1rem;padding:0.75rem 1rem;background:#080f1c;'
+            'border:1px solid #1e3a5f;border-radius:8px;display:flex;align-items:center;gap:0.6rem;">'
+            '<span style="font-size:1.1rem;">📊</span>'
+            '<span style="color:#64748b;font-size:0.8rem;">'
+            'Email includes a <strong style="color:#94a3b8;">Most Probable Exact Matchups</strong> '
+            'chart — rendered fresh each morning from that day&#39;s MC snapshot.'
+            '</span>'
+            '</div>',
             unsafe_allow_html=True,
         )
         st.caption(
