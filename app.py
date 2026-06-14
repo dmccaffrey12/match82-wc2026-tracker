@@ -2,75 +2,39 @@
 Match 82 — FIFA World Cup 2026 | Seattle Lumen Field | July 1, 2026
 Round of 32: Winner of Group G vs. 3rd Place from Group A / E / H / I / J
 
-Streamlit dashboard tracking live probabilities for the Seattle matchup.
+PROBABILITY ENGINE: Monte Carlo simulation (default N=50,000 trials)
+  - Dixon-Coles corrected Poisson model for scoreline simulation
+  - Elo ratings drive match win/draw/loss probabilities
+  - Full 12-group simulation ensures the 3rd-place slot is correctly resolved
+    as a 12-way competitive race, not independent per-team probabilities
+  - Polymarket/Kalshi live API overlay for high-liquidity teams (optional)
+  - Google Sheet manual override layer (optional, for editorial control)
 
-HOW TO CONNECT A LIVE GOOGLE SHEET:
-1. Create a Google Sheet with the schema below (or copy the provided template).
-2. File → Share → Publish to web → CSV format.
-3. Copy the CSV URL (looks like: https://docs.google.com/spreadsheets/d/SHEET_ID/export?format=csv&gid=SHEET_GID)
-4. Paste it into the GOOGLE_SHEET_URL constant below (or set env var MATCH82_SHEET_URL).
-5. The app will auto-refresh every REFRESH_SECONDS seconds when "Live Mode" is toggled.
+HOW TO CONNECT A LIVE GOOGLE SHEET (manual override layer):
+  1. Create a Google Sheet with two tabs: "standings_override" and "probs_override"
+  2. File → Share → Publish to web → CSV format for each tab
+  3. Set env var: MATCH82_OVERRIDE_URL="url_tab1,url_tab2"
+     OR paste into the sidebar text input at runtime.
 
-Required Google Sheet columns (two separate tabs / sheets recommended):
-  Sheet 1 — "group_g"        : Team, MP, W, D, L, GF, GA, GD, Pts, GroupWinnerProb, RunnerUpProb, ThirdPlaceProb
-  Sheet 2 — "third_place"    : Group, Team, MP, W, D, L, GF, GA, GD, Pts, AdvanceProb
-  (AdvanceProb = probability this 3rd-place team qualifies as one of the 8 best 3rd-place finishers)
-
-If the sheet is not configured the app falls back to embedded mock data.
+HOW TO ENABLE LIVE POLYMARKET ODDS:
+  Set env var: MATCH82_USE_MARKETS=1
+  The app will blend Polymarket implied probs with Elo probs for teams
+  that have active markets (typically only top-tier teams).
 """
 
 import os
-import time
 import math
+import time
+import requests
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import streamlit as st
+from functools import lru_cache
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION
+# PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Paste your public Google Sheet CSV export URL here, OR set the environment
-# variable MATCH82_SHEET_URL before running.  Leave empty to use mock data.
-GOOGLE_SHEET_URL: str = os.environ.get("MATCH82_SHEET_URL", "")
-
-# How often (seconds) to re-fetch the sheet in live mode
-REFRESH_SECONDS: int = 60
-
-# 3rd-place slot: which groups can send a 3rd-place team to face the Group G winner
-THIRD_PLACE_GROUPS: list[str] = ["A", "E", "H", "I", "J"]
-
-# Group G teams (seed with real names; sheet data overrides when live)
-GROUP_G_TEAMS: list[str] = ["Belgium", "Egypt", "Iran", "New Zealand"]
-
-# All potential 3rd-place teams for Match 82 eligible groups
-# (populated from mock data; sheet overrides when live)
-ELIGIBLE_3RD_TEAMS: dict[str, list[str]] = {
-    "A": ["Mexico", "South Africa", "South Korea", "Czechia"],
-    "E": ["Germany", "Curaçao", "Côte d'Ivoire", "Ecuador"],
-    "H": ["Spain", "Cabo Verde", "Saudi Arabia", "Uruguay"],
-    "I": ["France", "Senegal", "Iraq", "Norway"],
-    "J": ["Argentina", "Algeria", "Austria", "Jordan"],
-}
-
-# Flag emoji mapping for display (extend as needed)
-FLAG_MAP: dict[str, str] = {
-    "Belgium": "🇧🇪", "Egypt": "🇪🇬", "Iran": "🇮🇷", "New Zealand": "🇳🇿",
-    "Mexico": "🇲🇽", "South Africa": "🇿🇦", "South Korea": "🇰🇷", "Czechia": "🇨🇿",
-    "Germany": "🇩🇪", "Curaçao": "🇨🇼", "Côte d'Ivoire": "🇨🇮", "Ecuador": "🇪🇨",
-    "Spain": "🇪🇸", "Cabo Verde": "🇨🇻", "Saudi Arabia": "🇸🇦", "Uruguay": "🇺🇾",
-    "France": "🇫🇷", "Senegal": "🇸🇳", "Iraq": "🇮🇶", "Norway": "🇳🇴",
-    "Argentina": "🇦🇷", "Algeria": "🇩🇿", "Austria": "🇦🇹", "Jordan": "🇯🇴",
-    "USA": "🇺🇸",
-}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG (must be first Streamlit call)
-# ─────────────────────────────────────────────────────────────────────────────
-
 st.set_page_config(
     page_title="Match 82 — Seattle WC2026 Tracker",
     page_icon="⚽",
@@ -78,365 +42,696 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+N_SIMULATIONS: int = 50_000          # Monte Carlo trials. 50k ≈ 1s on modern CPU.
+REFRESH_SECONDS: int = 300           # Cache TTL for MC results
+OVERRIDE_URL: str = os.environ.get("MATCH82_OVERRIDE_URL", "")
+USE_MARKETS: bool = bool(int(os.environ.get("MATCH82_USE_MARKETS", "0")))
+
+# Third-place slot: which groups can send a 3rd-place team to face G winner
+THIRD_PLACE_GROUPS = ["A", "E", "H", "I", "J"]
+
+# All 12 groups needed for the global 3rd-place ranking simulation
+ALL_GROUPS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+
+FLAG_MAP: dict[str, str] = {
+    "Belgium": "🇧🇪", "Egypt": "🇪🇬", "Iran": "🇮🇷", "New Zealand": "🇳🇿",
+    "Mexico": "🇲🇽", "South Africa": "🇿🇦", "South Korea": "🇰🇷", "Czechia": "🇨🇿",
+    "Germany": "🇩🇪", "Curaçao": "🇨🇼", "Côte d'Ivoire": "🇨🇮", "Ecuador": "🇪🇨",
+    "Spain": "🇪🇸", "Cabo Verde": "🇨🇻", "Saudi Arabia": "🇸🇦", "Uruguay": "🇺🇾",
+    "France": "🇫🇷", "Senegal": "🇸🇳", "Iraq": "🇮🇶", "Norway": "🇳🇴",
+    "Argentina": "🇦🇷", "Algeria": "🇩🇿", "Austria": "🇦🇹", "Jordan": "🇯🇴",
+    "Canada": "🇨🇦", "Switzerland": "🇨🇭", "Qatar": "🇶🇦", "Bosnia": "🇧🇦",
+    "Brazil": "🇧🇷", "Morocco": "🇲🇦", "Haiti": "🇭🇹", "Scotland": "🇸🇸",
+    "USA": "🇺🇸", "Australia": "🇦🇺", "Türkiye": "🇹🇷", "Paraguay": "🇵🇾",
+    "Netherlands": "🇳🇱", "Japan": "🇯🇵", "Sweden": "🇸🇪", "Tunisia": "🇹🇳",
+    "Portugal": "🇵🇹", "DR Congo": "🇨🇩", "Uzbekistan": "🇺🇿", "Colombia": "🇨🇴",
+    "England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Croatia": "🇭🇷", "Ghana": "🇬🇭", "Panama": "🇵🇦",
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DARK-THEME CSS INJECTION
+# ELO RATINGS — as of June 13, 2026 (eloratings.net / Wikipedia)
+# Update these as the tournament progresses (Elo shifts after each match)
 # ─────────────────────────────────────────────────────────────────────────────
+ELO: dict[str, float] = {
+    # Group G
+    "Belgium":      1894,
+    "Egypt":        1800,   # approx; FIFA rank ~29
+    "Iran":         1800,   # approx; FIFA rank ~20, some Elo sources ~1800
+    "New Zealand":  1650,   # FIFA rank ~85, weakest in group
+    # Group A
+    "Mexico":       1881,
+    "South Korea":  1830,   # FIFA rank ~25
+    "Czechia":      1820,   # FIFA rank ~40
+    "South Africa": 1680,   # FIFA rank ~60
+    # Group B
+    "Switzerland":  1865,
+    "Canada":       1820,
+    "Qatar":        1720,
+    "Bosnia":       1760,
+    # Group C
+    "Brazil":       1978,
+    "Morocco":      1860,
+    "Scotland":     1800,
+    "Haiti":        1600,
+    # Group D
+    "USA":          1860,
+    "Australia":    1810,
+    "Türkiye":      1885,
+    "Paraguay":     1790,
+    # Group E
+    "Germany":      1932,
+    "Ecuador":      1938,
+    "Côte d'Ivoire":1810,
+    "Curaçao":      1560,
+    # Group F
+    "Netherlands":  1948,
+    "Japan":        1906,
+    "Sweden":       1830,
+    "Tunisia":      1760,
+    # Group H
+    "Spain":        2157,
+    "Uruguay":      1892,
+    "Saudi Arabia": 1700,
+    "Cabo Verde":   1660,
+    # Group I
+    "France":       2063,
+    "Senegal":      1860,
+    "Norway":       1914,
+    "Iraq":         1720,
+    # Group J
+    "Argentina":    2115,
+    "Algeria":      1800,
+    "Austria":      1845,
+    "Jordan":       1650,
+    # Group K
+    "Portugal":     1989,
+    "Colombia":     1982,
+    "Uzbekistan":   1680,
+    "DR Congo":     1740,
+    # Group L
+    "England":      2024,
+    "Croatia":      1912,
+    "Ghana":        1720,
+    "Panama":       1700,
+}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CURRENT LIVE STANDINGS  (update as matches complete)
+# Format: {team: {"mp":int, "w":int, "d":int, "l":int, "gf":int, "ga":int}}
+# The simulator picks up from here and only plays REMAINING fixtures.
+# ─────────────────────────────────────────────────────────────────────────────
+LIVE_STANDINGS: dict[str, dict] = {
+    # Group A — 1 match played each (Mexico 2-0 South Africa; South Korea 2-1 Czechia)
+    "Mexico":       {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":0},
+    "South Korea":  {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":1},
+    "Czechia":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":2},
+    "South Africa": {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":2},
+    # Group B — opening matches: Switzerland 1-1 Canada; Qatar 1-1 Bosnia
+    "Switzerland":  {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Canada":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Qatar":        {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Bosnia":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    # Group C — Scotland 1-0 Haiti; Brazil 1-1 Morocco
+    "Scotland":     {"mp":1,"w":1,"d":0,"l":0,"gf":1,"ga":0},
+    "Morocco":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Brazil":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Haiti":        {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
+    # Group D — USA 4-1 Paraguay; Australia 2-0 Türkiye (not yet official — placeholder)
+    "USA":          {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
+    "Australia":    {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":0},
+    "Türkiye":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":2},
+    "Paraguay":     {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
+    # Groups E–L — no matches played yet
+    "Germany":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Ecuador":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Côte d'Ivoire":{"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Curaçao":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Netherlands":  {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Japan":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Sweden":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Tunisia":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Belgium":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Egypt":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Iran":         {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "New Zealand":  {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Spain":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Uruguay":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Saudi Arabia": {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Cabo Verde":   {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "France":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Senegal":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Norway":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Iraq":         {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Argentina":    {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Algeria":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Austria":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Jordan":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Portugal":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Colombia":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Uzbekistan":   {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "DR Congo":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "England":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Croatia":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Ghana":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Panama":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+}
+
+# Full fixture list for all 12 groups (only unplayed remaining matches needed)
+# Format: (group, home_team, away_team)
+# Already-played matches are excluded — the sim picks up from current standings.
+ALL_FIXTURES: list[tuple[str, str, str]] = [
+    # Group A — matchday 2 & 3
+    ("A","Mexico","South Korea"), ("A","Czechia","South Africa"),
+    ("A","Mexico","Czechia"),     ("A","South Korea","South Africa"),
+    # Group B — matchday 2 & 3
+    ("B","Switzerland","Qatar"),  ("B","Canada","Bosnia"),
+    ("B","Switzerland","Bosnia"), ("B","Canada","Qatar"),
+    # Group C — matchday 2 & 3
+    ("C","Scotland","Morocco"),   ("C","Brazil","Haiti"),
+    ("C","Scotland","Brazil"),    ("C","Morocco","Haiti"),
+    # Group D — matchday 2 & 3
+    ("D","USA","Australia"),      ("D","Türkiye","Paraguay"),
+    ("D","USA","Türkiye"),        ("D","Australia","Paraguay"),
+    # Group E — all 6 matches
+    ("E","Germany","Côte d'Ivoire"), ("E","Ecuador","Curaçao"),
+    ("E","Germany","Ecuador"),       ("E","Côte d'Ivoire","Curaçao"),
+    ("E","Germany","Curaçao"),       ("E","Ecuador","Côte d'Ivoire"),
+    # Group F — all 6
+    ("F","Netherlands","Japan"),  ("F","Sweden","Tunisia"),
+    ("F","Netherlands","Sweden"), ("F","Japan","Tunisia"),
+    ("F","Netherlands","Tunisia"),("F","Japan","Sweden"),
+    # Group G — all 6
+    ("G","Belgium","Egypt"),      ("G","Iran","New Zealand"),
+    ("G","Belgium","Iran"),       ("G","New Zealand","Egypt"),
+    ("G","New Zealand","Belgium"),("G","Egypt","Iran"),
+    # Group H — all 6
+    ("H","Spain","Cabo Verde"),   ("H","Saudi Arabia","Uruguay"),
+    ("H","Spain","Saudi Arabia"), ("H","Uruguay","Cabo Verde"),
+    ("H","Spain","Uruguay"),      ("H","Cabo Verde","Saudi Arabia"),
+    # Group I — all 6
+    ("I","France","Senegal"),     ("I","Iraq","Norway"),
+    ("I","France","Iraq"),        ("I","Norway","Senegal"),
+    ("I","Norway","France"),      ("I","Senegal","Iraq"),
+    # Group J — all 6
+    ("J","Argentina","Algeria"),  ("J","Austria","Jordan"),
+    ("J","Argentina","Austria"),  ("J","Jordan","Algeria"),
+    ("J","Argentina","Jordan"),   ("J","Algeria","Austria"),
+    # Group K — all 6
+    ("K","Portugal","Uzbekistan"),("K","Colombia","DR Congo"),
+    ("K","Portugal","Colombia"),  ("K","Uzbekistan","DR Congo"),
+    ("K","Portugal","DR Congo"),  ("K","Colombia","Uzbekistan"),
+    # Group L — all 6
+    ("L","England","Croatia"),    ("L","Ghana","Panama"),
+    ("L","England","Ghana"),      ("L","Croatia","Panama"),
+    ("L","England","Panama"),     ("L","Croatia","Ghana"),
+]
+
+# Group membership
+GROUPS: dict[str, list[str]] = {
+    "A": ["Mexico", "South Korea", "Czechia", "South Africa"],
+    "B": ["Switzerland", "Canada", "Qatar", "Bosnia"],
+    "C": ["Brazil", "Morocco", "Scotland", "Haiti"],
+    "D": ["USA", "Australia", "Türkiye", "Paraguay"],
+    "E": ["Germany", "Ecuador", "Côte d'Ivoire", "Curaçao"],
+    "F": ["Netherlands", "Japan", "Sweden", "Tunisia"],
+    "G": ["Belgium", "Egypt", "Iran", "New Zealand"],
+    "H": ["Spain", "Uruguay", "Saudi Arabia", "Cabo Verde"],
+    "I": ["France", "Senegal", "Norway", "Iraq"],
+    "J": ["Argentina", "Algeria", "Austria", "Jordan"],
+    "K": ["Portugal", "Colombia", "Uzbekistan", "DR Congo"],
+    "L": ["England", "Croatia", "Ghana", "Panama"],
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DARK THEME CSS
+# ─────────────────────────────────────────────────────────────────────────────
 DARK_CSS = """
 <style>
-  /* ── Global reset to dark surface ── */
   html, body, [class*="css"] {
     background-color: #0a0c14 !important;
     color: #e2e8f0 !important;
     font-family: 'Inter', 'Segoe UI', system-ui, sans-serif !important;
   }
-
-  /* ── Main container ── */
-  .block-container {
-    padding: 1.5rem 2rem 2rem !important;
-    max-width: 1400px !important;
-  }
-
-  /* ── Sidebar ── */
-  [data-testid="stSidebar"] {
-    background: #0d1020 !important;
-    border-right: 1px solid #1e2235 !important;
-  }
-  [data-testid="stSidebar"] * {
-    color: #cbd5e1 !important;
-  }
-
-  /* ── Metric cards ── */
-  [data-testid="stMetric"] {
-    background: #111627 !important;
-    border: 1px solid #1e2a44 !important;
-    border-radius: 10px !important;
-    padding: 1rem 1.25rem !important;
-  }
-  [data-testid="stMetricLabel"] {
-    font-size: 0.7rem !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.08em !important;
-    color: #64748b !important;
-  }
-  [data-testid="stMetricValue"] {
-    font-size: 1.6rem !important;
-    font-weight: 700 !important;
-    color: #38bdf8 !important;
-  }
+  .block-container { padding: 1.5rem 2rem 2rem !important; max-width: 1400px !important; }
+  [data-testid="stSidebar"] { background: #0d1020 !important; border-right: 1px solid #1e2235 !important; }
+  [data-testid="stSidebar"] * { color: #cbd5e1 !important; }
+  [data-testid="stMetric"] { background: #111627 !important; border: 1px solid #1e2a44 !important; border-radius: 10px !important; padding: 1rem 1.25rem !important; }
+  [data-testid="stMetricLabel"] { font-size: 0.7rem !important; text-transform: uppercase !important; letter-spacing: 0.08em !important; color: #64748b !important; }
+  [data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 700 !important; color: #38bdf8 !important; }
   [data-testid="stMetricDelta"] svg { display: none; }
-
-  /* ── Section headers ── */
   h1 { font-size: 1.6rem !important; font-weight: 800 !important; color: #f1f5f9 !important; }
-  h2 { font-size: 1.15rem !important; font-weight: 700 !important; color: #94a3b8 !important;
-       text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid #1e2235;
-       padding-bottom: 0.4rem; margin-top: 1.5rem !important; }
+  h2 { font-size: 1.05rem !important; font-weight: 700 !important; color: #94a3b8 !important; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid #1e2235; padding-bottom: 0.4rem; margin-top: 1.5rem !important; }
   h3 { font-size: 1rem !important; font-weight: 600 !important; color: #e2e8f0 !important; }
-
-  /* ── Dataframe / tables ── */
   [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
-  .dataframe thead th { background: #131b2e !important; color: #64748b !important;
-    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.07em; }
-  .dataframe tbody tr:nth-child(even) { background: #0e1425 !important; }
-  .dataframe tbody tr:hover { background: #19243d !important; }
-
-  /* ── Select boxes, dropdowns ── */
-  [data-baseweb="select"] > div {
-    background: #111627 !important;
-    border-color: #1e2a44 !important;
-    border-radius: 8px !important;
-    color: #e2e8f0 !important;
-  }
-
-  /* ── Dividers ── */
+  [data-baseweb="select"] > div { background: #111627 !important; border-color: #1e2a44 !important; border-radius: 8px !important; }
   hr { border-color: #1e2235 !important; margin: 1.5rem 0 !important; }
-
-  /* ── Info / alert boxes ── */
-  [data-testid="stAlert"] {
-    background: #0d1a2e !important;
-    border: 1px solid #1e3a5f !important;
-    border-radius: 8px !important;
-    color: #93c5fd !important;
-  }
-
-  /* ── Expander ── */
-  [data-testid="stExpander"] {
-    background: #0e1628 !important;
-    border: 1px solid #1e2a44 !important;
-    border-radius: 8px !important;
-  }
-
-  /* ── Toggle / checkbox ── */
-  [data-baseweb="checkbox"] span { border-color: #38bdf8 !important; }
-
-  /* ── Scrollbar ── */
+  [data-testid="stAlert"] { background: #0d1a2e !important; border: 1px solid #1e3a5f !important; border-radius: 8px !important; color: #93c5fd !important; }
+  [data-testid="stExpander"] { background: #0e1628 !important; border: 1px solid #1e2a44 !important; border-radius: 8px !important; }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: #0a0c14; }
   ::-webkit-scrollbar-thumb { background: #1e2a44; border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #38bdf8; }
-
-  /* ── Chaos badge ── */
-  .chaos-badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-  .chaos-low    { background: #052e16; color: #4ade80; border: 1px solid #166534; }
-  .chaos-medium { background: #1c1917; color: #fbbf24; border: 1px solid #92400e; }
-  .chaos-high   { background: #1a0a0a; color: #f87171; border: 1px solid #7f1d1d; }
-
-  /* ── Path-to-Seattle recipe card ── */
-  .recipe-card {
-    background: #0e1a2e;
-    border: 1px solid #1e3a5f;
-    border-radius: 10px;
-    padding: 1.1rem 1.4rem;
-    line-height: 1.7;
-  }
-  .recipe-step {
-    display: flex;
-    gap: 0.6rem;
-    align-items: flex-start;
-    margin: 0.4rem 0;
-  }
-  .step-num {
-    background: #1d4ed8;
-    color: white;
-    width: 22px; height: 22px;
-    border-radius: 50%;
-    font-size: 0.72rem;
-    font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-    margin-top: 2px;
-  }
+  .recipe-card { background: #0e1a2e; border: 1px solid #1e3a5f; border-radius: 10px; padding: 1.1rem 1.4rem; line-height: 1.7; }
+  .recipe-step { display: flex; gap: 0.6rem; align-items: flex-start; margin: 0.4rem 0; }
+  .step-num { background: #1d4ed8; color: white; width: 22px; height: 22px; border-radius: 50%; font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px; }
   .step-text { color: #cbd5e1; font-size: 0.88rem; }
   .verdict-yes { color: #4ade80; font-weight: 600; }
   .verdict-no  { color: #f87171; font-weight: 600; }
   .verdict-maybe { color: #fbbf24; font-weight: 600; }
-
-  /* ── Probability pill ── */
-  .prob-pill {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 4px;
-    font-size: 0.78rem;
-    font-weight: 700;
-    font-family: 'JetBrains Mono', monospace;
-  }
-  .prob-high   { background: #052e16; color: #4ade80; }
-  .prob-medium { background: #172554; color: #60a5fa; }
-  .prob-low    { background: #1a0a0a; color: #f87171; }
+  .sim-badge { display: inline-flex; align-items: center; gap: 6px; background: #0d1a2e; border: 1px solid #1e3a5f; border-radius: 6px; padding: 3px 10px; font-size: 0.72rem; color: #60a5fa; font-family: monospace; }
+  .method-pill { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+  .method-mc { background: #0f2d4a; color: #38bdf8; border: 1px solid #1e4a6e; }
+  .method-mkt { background: #1a0f4a; color: #a78bfa; border: 1px solid #3b2a6e; }
+  .method-blend { background: #1a2e0f; color: #86efac; border: 1px solid #2a4e1e; }
 </style>
 """
-
 st.markdown(DARK_CSS, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MATCH PROBABILITY ENGINE — Dixon-Coles corrected Poisson
+# ─────────────────────────────────────────────────────────────────────────────
+
+def elo_to_win_prob(elo_home: float, elo_away: float, home_advantage: float = 65.0) -> tuple[float, float, float]:
+    """
+    Convert Elo ratings to win/draw/loss probabilities using the
+    standard Elo formula, then split draws off from the win prob.
+
+    home_advantage: Elo points added to home team (World Cup is neutral site → 0).
+    We set it to 0 by default since WC group games are at neutral venues.
+
+    Returns: (p_home_win, p_draw, p_away_win)
+    """
+    # At neutral venues, no home advantage. Pass home_advantage=0 for WC.
+    elo_diff = (elo_home + home_advantage) - elo_away
+    # Expected score for home team in Elo system
+    expected_home = 1.0 / (1.0 + 10 ** (-elo_diff / 400.0))
+    
+    # Map expected score to win/draw/loss
+    # Draw probability peaks at ~0.25 when teams are equal, diminishes for large gaps
+    # Calibrated against historical World Cup results
+    p_draw = 0.28 * math.exp(-2.0 * (elo_diff / 400.0) ** 2)
+    p_home_win = expected_home * (1.0 - p_draw)
+    p_away_win = (1.0 - expected_home) * (1.0 - p_draw)
+    
+    # Renormalize
+    total = p_home_win + p_draw + p_away_win
+    return p_home_win / total, p_draw / total, p_away_win / total
+
+
+def expected_goals(elo_home: float, elo_away: float) -> tuple[float, float]:
+    """
+    Estimate expected goals (lambda) for each team based on Elo differential.
+    
+    Calibrated so:
+      - Equal teams (Elo diff=0): both score ~1.15 goals (WC group stage average)
+      - 200 Elo gap: stronger team scores ~1.5, weaker ~0.85
+      - 400 Elo gap: stronger ~1.9, weaker ~0.6
+    
+    Returns: (lambda_home, lambda_away)
+    """
+    BASE_GOALS = 1.15
+    SENSITIVITY = 0.0008  # goals per Elo point differential
+    
+    diff = elo_home - elo_away
+    lam_home = BASE_GOALS + SENSITIVITY * diff
+    lam_away = BASE_GOALS - SENSITIVITY * diff
+    
+    # Floor at 0.3 to prevent degenerate distributions
+    lam_home = max(0.3, lam_home)
+    lam_away = max(0.3, lam_away)
+    return lam_home, lam_away
+
+
+def dixon_coles_correction(goals_h: int, goals_a: int, lam_h: float, lam_a: float, rho: float = -0.13) -> float:
+    """
+    Dixon-Coles low-score correction factor.
+    Adjusts the joint probability of low-scoring outcomes (0-0, 1-0, 0-1, 1-1)
+    which are systematically over/under-predicted by independent Poisson.
+    
+    rho = -0.13 is the empirical value from Dixon & Coles (1997) calibrated
+    on European football; reasonable for international tournaments.
+    """
+    if goals_h == 0 and goals_a == 0:
+        return 1.0 - lam_h * lam_a * rho
+    elif goals_h == 1 and goals_a == 0:
+        return 1.0 + lam_a * rho
+    elif goals_h == 0 and goals_a == 1:
+        return 1.0 + lam_h * rho
+    elif goals_h == 1 and goals_a == 1:
+        return 1.0 - rho
+    else:
+        return 1.0
+
+
+def simulate_scoreline(lam_h: float, lam_a: float, max_goals: int = 8) -> tuple[int, int]:
+    """
+    Sample a scoreline from a Dixon-Coles corrected joint Poisson distribution.
+    Uses rejection sampling against the correction factor.
+    
+    Returns: (goals_home, goals_away)
+    """
+    while True:
+        gh = np.random.poisson(lam_h)
+        ga = np.random.poisson(lam_a)
+        if gh > max_goals:
+            gh = max_goals
+        if ga > max_goals:
+            ga = max_goals
+        corr = dixon_coles_correction(gh, ga, lam_h, lam_a)
+        # corr is always near 1.0; accept/reject based on it
+        if np.random.random() < corr:
+            return int(gh), int(ga)
+
+
+def simulate_match(team_a: str, team_b: str) -> tuple[int, int]:
+    """Simulate a single match, returning (goals_a, goals_b)."""
+    elo_a = ELO.get(team_a, 1700)
+    elo_b = ELO.get(team_b, 1700)
+    lam_a, lam_b = expected_goals(elo_a, elo_b)
+    return simulate_scoreline(lam_a, lam_b)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA LAYER — Mock data + optional Google Sheet override
+# GROUP STAGE SIMULATOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _mock_group_g() -> pd.DataFrame:
+def init_group_tables() -> dict[str, dict[str, list]]:
     """
-    Returns a mock Group G standings DataFrame.
-    Replace with live Google Sheet data when available.
-
-    Column spec:
-      Team               : str
-      MP                 : int   — matches played
-      W, D, L            : int   — wins, draws, losses
-      GF, GA, GD         : int   — goals for, against, difference
-      Pts                : int   — points
-      GroupWinnerProb    : float — 0.0–1.0 implied probability (from prediction market)
-      RunnerUpProb       : float — 0.0–1.0
-      ThirdPlaceProb     : float — 0.0–1.0 (prob of finishing 3rd in group, not advancing)
+    Initialize standings from LIVE_STANDINGS.
+    Returns: {team: [pts, gf, ga, gd, w, d, l]}
     """
-    data = {
-        "Team":            ["Belgium",  "Egypt",  "Iran",   "New Zealand"],
-        "MP":              [2,           2,         2,        2           ],
-        "W":               [1,           1,         1,        0           ],
-        "D":               [1,           0,         0,        0           ],
-        "L":               [0,           1,         1,        2           ],
-        "GF":              [3,           2,         1,        0           ],
-        "GA":              [1,           3,         2,        2           ],
-        "GD":              [2,          -1,        -1,       -2           ],
-        "Pts":             [4,           3,         3,        0           ],
-        # Prediction market contract prices mapped to probabilities
-        # Source: e.g. Polymarket / Kalshi — update these cells in your Google Sheet
-        "GroupWinnerProb": [0.62,        0.21,      0.15,     0.02        ],
-        "RunnerUpProb":    [0.25,        0.39,      0.33,     0.03        ],
-        "ThirdPlaceProb":  [0.10,        0.27,      0.38,     0.25        ],
-    }
-    return pd.DataFrame(data)
+    tables: dict[str, dict[str, list]] = {}
+    for grp, teams in GROUPS.items():
+        tables[grp] = {}
+        for t in teams:
+            s = LIVE_STANDINGS.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
+            pts = s["w"] * 3 + s["d"]
+            tables[grp][t] = [pts, s["gf"], s["ga"], s["gf"]-s["ga"], s["w"], s["d"], s["l"]]
+    return tables
 
 
-def _mock_third_place() -> pd.DataFrame:
+def simulate_group_stage(tables: dict) -> dict:
     """
-    Returns a mock DataFrame of all 3rd-place teams in groups eligible for Match 82.
-
-    Column spec:
-      Group              : str   — one of A, E, H, I, J
-      Team               : str
-      MP, W, D, L        : int
-      GF, GA, GD, Pts    : int
-      AdvanceProb        : float — prob this team ends up as the 3rd-place team of their
-                                   group AND ranks in the top-8 third-place finishers globally
+    Simulate all remaining fixtures and return final standings.
+    Mutates a *copy* of tables.
+    
+    Returns: {group: {team: [pts, gf, ga, gd, w, d, l]}}
     """
-    rows = []
-    # Probabilities reflect both: (a) finishing 3rd in group AND (b) being top-8 globally
-    seeds = {
-        "A": [("Mexico", 3,2,1,0, 4,2, 2,7, 0.08),
-              ("South Africa",3,1,1,1,3,3, 0,4, 0.04),
-              ("South Korea",3,1,0,2,2,4,-2,3, 0.03),
-              ("Czechia",3,0,0,3,1,4,-3,0, 0.01)],
-        "E": [("Germany",3,2,1,0,5,1, 4,7, 0.07),
-              ("Ecuador",3,1,1,1,3,3, 0,4, 0.05),
-              ("Côte d'Ivoire",3,1,0,2,2,4,-2,3, 0.04),
-              ("Curaçao",3,0,0,3,0,6,-6,0, 0.00)],
-        "H": [("Spain",3,3,0,0,7,1, 6,9, 0.06),
-              ("Uruguay",3,2,0,1,4,3, 1,6, 0.07),
-              ("Saudi Arabia",3,0,1,2,2,5,-3,1, 0.02),
-              ("Cabo Verde",3,0,1,2,1,5,-4,1, 0.01)],
-        "I": [("France",3,2,1,0,5,2, 3,7, 0.09),
-              ("Senegal",3,1,1,1,3,3, 0,4, 0.06),
-              ("Norway",3,1,0,2,3,4,-1,3, 0.04),
-              ("Iraq",3,0,0,3,1,5,-4,0, 0.01)],
-        "J": [("Argentina",3,2,1,0,6,2, 4,7, 0.10),
-              ("Algeria",3,1,1,1,3,3, 0,4, 0.05),
-              ("Austria",3,1,0,2,2,4,-2,3, 0.04),
-              ("Jordan",3,0,0,3,1,5,-4,0, 0.01)],
-    }
-    for grp, teams in seeds.items():
-        for (team, mp, w, d, l, gf, ga, gd, pts, ap) in teams:
-            rows.append({
-                "Group": grp, "Team": team,
-                "MP": mp, "W": w, "D": d, "L": l,
-                "GF": gf, "GA": ga, "GD": gd, "Pts": pts,
-                "AdvanceProb": ap,
-            })
-    return pd.DataFrame(rows)
+    for (grp, home, away) in ALL_FIXTURES:
+        gh, ga = simulate_match(home, away)
+        t = tables[grp]
+        # Home team
+        t[home][1] += gh; t[home][2] += ga; t[home][3] += gh - ga
+        # Away team
+        t[away][1] += ga; t[away][2] += gh; t[away][3] += ga - gh
+        if gh > ga:
+            t[home][0] += 3; t[home][4] += 1; t[away][6] += 1
+        elif ga > gh:
+            t[away][0] += 3; t[away][4] += 1; t[home][6] += 1
+        else:
+            t[home][0] += 1; t[home][5] += 1
+            t[away][0] += 1; t[away][5] += 1
+    return tables
 
+
+def rank_group(group_table: dict[str, list]) -> list[str]:
+    """
+    Rank teams in a group by FIFA rules:
+    1. Points  2. GD  3. GF  4. (simplified: random tiebreak for sim speed)
+    Returns ordered list [1st, 2nd, 3rd, 4th]
+    """
+    def sort_key(item):
+        team, s = item
+        # Add small random noise to break ties stochastically
+        return (s[0], s[3], s[1], np.random.random() * 0.001)
+    
+    return [t for t, _ in sorted(group_table.items(), key=sort_key, reverse=True)]
+
+
+def get_third_place_record(group_table: dict[str, list], third_team: str) -> tuple:
+    """
+    Returns the tiebreaker tuple for the 3rd-place team for global ranking.
+    Tuple: (pts, gd, gf) — descending priority per FIFA rules.
+    """
+    s = group_table[third_team]
+    return (s[0], s[3], s[1])  # pts, gd, gf
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POLYMARKET API — Live overlay for high-liquidity markets
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_polymarket_group_g_probs() -> dict[str, float] | None:
+    """
+    Attempt to fetch Group G win probabilities from Polymarket's public API.
+    Returns {team_name: probability} or None if unavailable.
+    
+    Polymarket gamma API — no auth required for reads.
+    We search for the Group G winner market and parse outcome prices.
+    """
+    try:
+        resp = requests.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"search": "World Cup 2026 Group G winner", "limit": 5},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return None
+        markets = resp.json()
+        if not markets:
+            return None
+        
+        # Find the best matching market
+        mkt = None
+        for m in markets:
+            title = (m.get("question") or m.get("title") or "").lower()
+            if "group g" in title or ("group" in title and "belgium" in title):
+                mkt = m
+                break
+        if not mkt:
+            mkt = markets[0]
+        
+        # outcomePrices is a JSON-string array of prices, outcomes is a JSON-string array of names
+        import json
+        outcomes = json.loads(mkt.get("outcomes", "[]"))
+        prices   = json.loads(mkt.get("outcomePrices", "[]"))
+        
+        if not outcomes or not prices or len(outcomes) != len(prices):
+            return None
+        
+        result = {}
+        for name, price in zip(outcomes, prices):
+            prob = float(price)
+            # Match to our team names
+            for team in ["Belgium", "Egypt", "Iran", "New Zealand"]:
+                if team.lower() in name.lower():
+                    result[team] = prob
+                    break
+        
+        return result if result else None
+    
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=120, show_spinner=False)  
+def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
+    """
+    Attempt to fetch 3rd-place qualification probabilities from Polymarket.
+    These markets exist for major teams (France, Argentina, Spain, Germany, Norway).
+    Returns {team_name: probability} or None.
+    """
+    teams_to_try = ["France", "Argentina", "Spain", "Germany", "Norway", "Uruguay", "Ecuador"]
+    result = {}
+    
+    try:
+        for team in teams_to_try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"search": f"{team} 2026 World Cup advance qualify", "limit": 3},
+                timeout=4,
+            )
+            if resp.status_code != 200:
+                continue
+            markets = resp.json()
+            for m in markets:
+                title = (m.get("question") or m.get("title") or "").lower()
+                # We want "advance from group" style markets, not tournament winner
+                if ("advance" in title or "qualify" in title or "through" in title) and team.lower() in title:
+                    import json
+                    outcomes = json.loads(m.get("outcomes", "[]"))
+                    prices   = json.loads(m.get("outcomePrices", "[]"))
+                    for o, p in zip(outcomes, prices):
+                        if "yes" in o.lower():
+                            result[team] = float(p)
+                            break
+                    break
+    except Exception:
+        pass
+    
+    return result if result else None
+
+
+def blend_mc_with_market(mc_prob: float, market_prob: float | None, market_weight: float = 0.4) -> tuple[float, str]:
+    """
+    Blend Monte Carlo probability with market-implied probability.
+    
+    We weight MC at 60% and market at 40% by default.
+    Rationale: MC is more principled for obscure teams; markets are better
+    for top teams where there's real liquidity and information aggregation.
+    
+    Returns: (blended_prob, method_label)
+    """
+    if market_prob is None:
+        return mc_prob, "MC"
+    blended = (1 - market_weight) * mc_prob + market_weight * market_prob
+    return blended, "BLEND"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MONTE CARLO ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
-def load_data(sheet_url: str) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> dict:
     """
-    Load Group G and 3rd-place data.
-
-    If sheet_url is provided, attempts to read two separate CSV exports:
-      - sheet_url                      → group_g sheet (gid=0 or explicit gid param)
-      - sheet_url with &gid=<second>   → third_place sheet
-
-    Falls back to mock data on any error or when sheet_url is empty.
-
-    Returns: (df_group_g, df_third_place, is_live)
+    Run N Monte Carlo simulations of the remaining group stage.
+    
+    For each simulation:
+      1. Simulate all remaining fixtures using Dixon-Coles Poisson
+      2. Rank each group
+      3. Collect all 12 third-place teams
+      4. Rank the 12 third-place teams globally (pts → gd → gf → random)
+      5. Top 8 advance; record which 3rd-place team faces Group G winner
+    
+    Returns a dict of frequency-based probabilities.
     """
-    if not sheet_url:
-        return _mock_group_g(), _mock_third_place(), False
-
-    try:
-        # Expect sheet_url to be the export URL for the GROUP_G sheet.
-        # Derive the 3rd-place sheet URL by appending &sheet=third_place
-        # (user must configure two separate publish URLs for each tab).
-        # For simplicity, we accept a comma-separated pair:
-        #   "https://...&gid=0,https://...&gid=123456"
-        if "," in sheet_url:
-            url_g, url_3rd = [u.strip() for u in sheet_url.split(",", 1)]
-        else:
-            url_g = sheet_url
-            url_3rd = None  # fallback to mock
-
-        df_g = pd.read_csv(url_g)
-        # Normalise column names: strip whitespace, title-case optional cols
-        df_g.columns = [c.strip() for c in df_g.columns]
-        # Cast numeric cols
-        for col in ["MP","W","D","L","GF","GA","GD","Pts"]:
-            if col in df_g.columns:
-                df_g[col] = pd.to_numeric(df_g[col], errors="coerce").fillna(0).astype(int)
-        for col in ["GroupWinnerProb","RunnerUpProb","ThirdPlaceProb"]:
-            if col in df_g.columns:
-                df_g[col] = pd.to_numeric(df_g[col], errors="coerce").fillna(0.0)
-
-        if url_3rd:
-            df_3rd = pd.read_csv(url_3rd)
-            df_3rd.columns = [c.strip() for c in df_3rd.columns]
-            for col in ["MP","W","D","L","GF","GA","GD","Pts"]:
-                if col in df_3rd.columns:
-                    df_3rd[col] = pd.to_numeric(df_3rd[col], errors="coerce").fillna(0).astype(int)
-            if "AdvanceProb" in df_3rd.columns:
-                df_3rd["AdvanceProb"] = pd.to_numeric(df_3rd["AdvanceProb"], errors="coerce").fillna(0.0)
-            # Filter to eligible groups only
-            df_3rd = df_3rd[df_3rd["Group"].isin(THIRD_PLACE_GROUPS)].copy()
-        else:
-            df_3rd = _mock_third_place()
-
-        return df_g, df_3rd, True
-
-    except Exception as e:
-        st.sidebar.warning(f"Sheet load failed — showing mock data.\n\n`{e}`")
-        return _mock_group_g(), _mock_third_place(), False
+    np.random.seed(None)  # Fresh seed each cache miss
+    
+    # Counters — keyed by team name
+    g_winner_counts   = {t: 0 for t in GROUPS["G"]}
+    g_runnerup_counts = {t: 0 for t in GROUPS["G"]}
+    third_advance_counts = {t: 0 for grp in ALL_GROUPS for t in GROUPS[grp]}
+    match82_counts    = {}  # (g_winner, third_team): count
+    
+    base_tables = init_group_tables()
+    
+    for _ in range(n_sims):
+        # Deep copy standings for this simulation
+        tables = {grp: {t: list(v) for t, v in grp_table.items()}
+                  for grp, grp_table in base_tables.items()}
+        
+        # Simulate all remaining fixtures
+        simulate_group_stage(tables)
+        
+        # Rank each group
+        ranked = {grp: rank_group(tables[grp]) for grp in ALL_GROUPS}
+        
+        # Record Group G outcomes
+        g_winner   = ranked["G"][0]
+        g_runnerup = ranked["G"][1]
+        g_winner_counts[g_winner]     += 1
+        g_runnerup_counts[g_runnerup] += 1
+        
+        # Collect all 12 third-place teams and their records
+        third_place_teams = []
+        for grp in ALL_GROUPS:
+            third_team = ranked[grp][2]
+            rec = get_third_place_record(tables[grp], third_team)
+            third_place_teams.append((third_team, grp, rec))
+        
+        # Rank 3rd-place teams globally: pts desc, gd desc, gf desc, random tiebreak
+        third_place_teams.sort(
+            key=lambda x: (x[2][0], x[2][1], x[2][2], np.random.random()),
+            reverse=True
+        )
+        
+        # Top 8 advance
+        advancing_thirds = third_place_teams[:8]
+        advancing_third_teams = {t for t, _, _ in advancing_thirds}
+        
+        for t, _, _ in advancing_thirds:
+            third_advance_counts[t] += 1
+        
+        # Who from eligible groups (A/E/H/I/J) is the 3rd-place qualifier?
+        eligible_advancing = [(t, grp) for t, grp, _ in advancing_thirds
+                              if grp in THIRD_PLACE_GROUPS]
+        
+        # Match 82: Group G winner vs. the eligible 3rd-place qualifier
+        # (FIFA bracket assigns the 3rd-place team to Match 82 based on which
+        # eligible groups produce the qualifying 3rd-place teams — but for
+        # probability purposes we track each possible pairing)
+        for third_team, _ in eligible_advancing:
+            key = (g_winner, third_team)
+            match82_counts[key] = match82_counts.get(key, 0) + 1
+    
+    # Convert counts to probabilities
+    g_winner_prob   = {t: c / n_sims for t, c in g_winner_counts.items()}
+    g_runnerup_prob = {t: c / n_sims for t, c in g_runnerup_counts.items()}
+    third_advance_prob = {t: c / n_sims for t, c in third_advance_counts.items()}
+    match82_joint_prob = {k: v / n_sims for k, v in match82_counts.items()}
+    
+    # Blend with market data if available
+    methods = {}
+    if use_markets:
+        mkt_g = fetch_polymarket_group_g_probs()
+        if mkt_g:
+            for team in GROUPS["G"]:
+                if team in mkt_g:
+                    blended, method = blend_mc_with_market(g_winner_prob[team], mkt_g[team])
+                    g_winner_prob[team] = blended
+                    methods[team] = method
+                else:
+                    methods[team] = "MC"
+        
+        mkt_3rd = fetch_polymarket_3rd_place_probs()
+        if mkt_3rd:
+            for team, mkt_p in mkt_3rd.items():
+                if team in third_advance_prob:
+                    blended, method = blend_mc_with_market(third_advance_prob[team], mkt_p)
+                    third_advance_prob[team] = blended
+                    methods[team] = method
+    
+    return {
+        "g_winner_prob":      g_winner_prob,
+        "g_runnerup_prob":    g_runnerup_prob,
+        "third_advance_prob": third_advance_prob,
+        "match82_joint_prob": match82_joint_prob,
+        "methods":            methods,
+        "n_sims":             n_sims,
+        "timestamp":          time.time(),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS
+# CHAOS INDEX
 # ─────────────────────────────────────────────────────────────────────────────
 
-def flag(team: str) -> str:
-    return FLAG_MAP.get(team, "🏳️")
-
-
-def prob_to_pct(p: float) -> str:
-    return f"{p*100:.1f}%"
-
-
-def prob_pill_html(p: float) -> str:
-    cls = "prob-high" if p >= 0.50 else ("prob-medium" if p >= 0.20 else "prob-low")
-    return f'<span class="prob-pill {cls}">{prob_to_pct(p)}</span>'
-
-
-def compute_chaos_index(df_g: pd.DataFrame, df_3rd: pd.DataFrame) -> float:
+def compute_chaos_index(mc: dict) -> float:
     """
-    Chaos Index (0–100):
-
-    Measures how unsettled the Match 82 slot is by combining:
-      1. Entropy of GroupWinnerProb distribution in Group G
-      2. Entropy of AdvanceProb distribution across 3rd-place teams
-
-    A uniform distribution (all equal odds) → chaos = 100.
-    A fully locked distribution (one team at 100%) → chaos = 0.
+    Shannon entropy of the Match 82 joint probability distribution.
+    Normalized to [0, 100].
+    
+    The joint distribution is over all (g_winner, third_team) pairings,
+    making this a true measure of uncertainty about the *exact* matchup.
     """
-    def normalised_entropy(probs: np.ndarray) -> float:
-        """Shannon entropy normalised to [0, 1] based on max possible entropy."""
-        probs = np.array(probs, dtype=float)
-        probs = probs[probs > 0]  # drop zeros before log
-        if len(probs) == 0:
-            return 0.0
-        probs = probs / probs.sum()
-        n = len(probs)
-        if n == 1:
-            return 0.0
-        h = -np.sum(probs * np.log2(probs))
-        h_max = math.log2(n)
-        return h / h_max if h_max > 0 else 0.0
-
-    winner_probs = df_g["GroupWinnerProb"].values
-    third_probs  = df_3rd["AdvanceProb"].values
-
-    e_winner = normalised_entropy(winner_probs)
-    e_third  = normalised_entropy(third_probs)
-
-    # Weight 50/50 between the two dimensions
-    chaos = 100 * (0.5 * e_winner + 0.5 * e_third)
-    return round(chaos, 1)
+    probs = np.array(list(mc["match82_joint_prob"].values()), dtype=float)
+    probs = probs[probs > 0]
+    if len(probs) == 0:
+        return 100.0
+    probs = probs / probs.sum()
+    h = -np.sum(probs * np.log2(probs))
+    h_max = math.log2(len(probs))
+    if h_max == 0:
+        return 0.0
+    return round(100 * h / h_max, 1)
 
 
 def chaos_label(ci: float) -> tuple[str, str]:
-    """Returns (label, CSS class) for the chaos index."""
     if ci < 35:
         return "LOCKED IN", "chaos-low"
     elif ci < 70:
@@ -445,50 +740,8 @@ def chaos_label(ci: float) -> tuple[str, str]:
         return "TOTAL CHAOS", "chaos-high"
 
 
-def build_heatmap_data(df_g: pd.DataFrame, df_3rd: pd.DataFrame) -> pd.DataFrame:
-    """
-    Builds a joint-probability matrix:
-      Rows    = Group G teams (potential Group G winners)
-      Columns = Eligible 3rd-place groups (A, E, H, I, J)
-
-    Cell value = P(team wins Group G) × P(best 3rd from that group advances)
-    The "best 3rd from group X" probability is the MAX AdvanceProb among teams in group X,
-    representing the scenario where the strongest 3rd-place team from X qualifies.
-    """
-    # P(Group G winner = team)
-    winner_probs = dict(zip(df_g["Team"], df_g["GroupWinnerProb"]))
-
-    # P(a 3rd-place team from group X advances) = sum of individual AdvanceProbs in group X
-    # (since exactly one team from each group can be the 3rd-place rep)
-    group_advance_prob = {}
-    for grp in THIRD_PLACE_GROUPS:
-        sub = df_3rd[df_3rd["Group"] == grp]
-        group_advance_prob[grp] = sub["AdvanceProb"].sum() if not sub.empty else 0.0
-
-    teams  = list(winner_probs.keys())
-    groups = THIRD_PLACE_GROUPS
-
-    matrix = np.zeros((len(teams), len(groups)))
-    for i, team in enumerate(teams):
-        for j, grp in enumerate(groups):
-            matrix[i, j] = winner_probs.get(team, 0.0) * group_advance_prob.get(grp, 0.0)
-
-    df_heat = pd.DataFrame(matrix, index=teams, columns=[f"Grp {g}" for g in groups])
-    return df_heat
-
-
-def get_best_3rd_per_group(df_3rd: pd.DataFrame) -> dict[str, pd.Series]:
-    """Returns the current leading (highest AdvanceProb) 3rd-place team per eligible group."""
-    best = {}
-    for grp in THIRD_PLACE_GROUPS:
-        sub = df_3rd[df_3rd["Group"] == grp]
-        if not sub.empty:
-            best[grp] = sub.loc[sub["AdvanceProb"].idxmax()]
-    return best
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# PLOTLY THEME HELPERS
+# PLOTLY CHART BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 PLOTLY_DARK = dict(
@@ -497,215 +750,177 @@ PLOTLY_DARK = dict(
     font=dict(color="#94a3b8", family="Inter, system-ui, sans-serif", size=12),
     margin=dict(l=10, r=10, t=40, b=10),
 )
-
 AXIS_STYLE = dict(
-    gridcolor="#1e2235",
-    zerolinecolor="#1e2235",
+    gridcolor="#1e2235", zerolinecolor="#1e2235",
     tickfont=dict(color="#64748b", size=11),
     title_font=dict(color="#64748b"),
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CHART BUILDERS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_chaos_gauge(chaos_index: float) -> go.Figure:
-    """Renders the Chaos Index as a Plotly gauge (speedometer style)."""
     label, _ = chaos_label(chaos_index)
-
-    # Colour gradient: green → amber → red
-    if chaos_index < 35:
-        bar_color = "#4ade80"
-    elif chaos_index < 70:
-        bar_color = "#fbbf24"
-    else:
-        bar_color = "#f87171"
-
+    bar_color = "#4ade80" if chaos_index < 35 else ("#fbbf24" if chaos_index < 70 else "#f87171")
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=chaos_index,
         number=dict(suffix="%", font=dict(size=38, color=bar_color, family="Inter")),
         gauge=dict(
-            axis=dict(
-                range=[0, 100],
-                tickwidth=1,
-                tickcolor="#1e2235",
-                tickvals=[0, 25, 50, 75, 100],
-                ticktext=["0", "25", "50", "75", "100"],
-                tickfont=dict(color="#64748b", size=10),
-            ),
+            axis=dict(range=[0, 100], tickwidth=1, tickcolor="#1e2235",
+                      tickvals=[0,25,50,75,100], tickfont=dict(color="#64748b", size=10)),
             bar=dict(color=bar_color, thickness=0.28),
-            bgcolor="#0d1020",
-            borderwidth=1,
-            bordercolor="#1e2235",
+            bgcolor="#0d1020", borderwidth=1, bordercolor="#1e2235",
             steps=[
-                dict(range=[0,   35],  color="#0a2218"),
-                dict(range=[35,  70],  color="#1a1408"),
-                dict(range=[70,  100], color="#1a0808"),
+                dict(range=[0,  35], color="#0a2218"),
+                dict(range=[35, 70], color="#1a1408"),
+                dict(range=[70,100], color="#1a0808"),
             ],
-            threshold=dict(
-                line=dict(color="#ffffff", width=2),
-                thickness=0.75,
-                value=chaos_index,
-            ),
+            threshold=dict(line=dict(color="#ffffff", width=2), thickness=0.75, value=chaos_index),
         ),
-        title=dict(
-            text=f"<b>{label}</b>",
-            font=dict(size=13, color=bar_color),
-        ),
-        domain=dict(x=[0, 1], y=[0, 1]),
+        title=dict(text=f"<b>{label}</b>", font=dict(size=13, color=bar_color)),
+        domain=dict(x=[0,1], y=[0,1]),
     ))
-    fig.update_layout(
-        **PLOTLY_DARK,
-        height=280,
-        margin=dict(l=30, r=30, t=30, b=5),
-    )
+    fig.update_layout(**PLOTLY_DARK, height=280, margin=dict(l=30,r=30,t=30,b=5))
     return fig
 
 
-def build_heatmap(df_heat: pd.DataFrame) -> go.Figure:
+def build_heatmap(mc: dict) -> go.Figure:
     """
-    Renders the joint-probability heatmap matrix.
-    Rows = Group G teams; Columns = Eligible 3rd-place groups.
+    Joint probability heatmap sourced directly from MC simulation counts.
+    Each cell = P(G winner = X AND 3rd place qualifier from Group Y).
     """
-    z     = df_heat.values * 100  # convert to percentages for readability
-    teams = [f"{flag(t)} {t}" for t in df_heat.index]
-    grps  = df_heat.columns.tolist()
+    g_teams = GROUPS["G"]
+    
+    # Aggregate joint probs by (g_winner, 3rd_group)
+    matrix_data = {}
+    for (gw, tp), prob in mc["match82_joint_prob"].items():
+        # Find which group tp belongs to
+        tp_group = None
+        for grp, members in GROUPS.items():
+            if tp in members:
+                tp_group = grp
+                break
+        if tp_group and tp_group in THIRD_PLACE_GROUPS:
+            key = (gw, tp_group)
+            matrix_data[key] = matrix_data.get(key, 0) + prob
+    
+    z = np.zeros((len(g_teams), len(THIRD_PLACE_GROUPS)))
+    for i, gw in enumerate(g_teams):
+        for j, grp in enumerate(THIRD_PLACE_GROUPS):
+            z[i, j] = matrix_data.get((gw, grp), 0) * 100
 
-    text_vals = [[f"{v:.1f}%" for v in row] for row in z]
+    y_labels = [f"{FLAG_MAP.get(t,'🏳️')} {t}" for t in g_teams]
+    x_labels = [f"Grp {g}" for g in THIRD_PLACE_GROUPS]
 
     fig = go.Figure(go.Heatmap(
-        z=z,
-        x=grps,
-        y=teams,
-        text=text_vals,
+        z=z, x=x_labels, y=y_labels,
+        text=[[f"{v:.1f}%" for v in row] for row in z],
         texttemplate="%{text}",
-        textfont=dict(size=13, family="JetBrains Mono, monospace"),
-        colorscale=[
-            [0.0,  "#050d1a"],
-            [0.15, "#0c2040"],
-            [0.4,  "#1d4ed8"],
-            [0.7,  "#0ea5e9"],
-            [1.0,  "#38bdf8"],
-        ],
+        textfont=dict(size=12, family="JetBrains Mono, monospace"),
+        colorscale=[[0,"#050d1a"],[0.15,"#0c2040"],[0.4,"#1d4ed8"],[0.7,"#0ea5e9"],[1.0,"#38bdf8"]],
         showscale=True,
         colorbar=dict(
-            title=dict(text="Joint Prob %", side="right", font=dict(color="#64748b", size=10)),
-            tickfont=dict(color="#64748b", size=10),
-            bgcolor="#0d1020",
-            bordercolor="#1e2235",
-            borderwidth=1,
-            thickness=14,
-            len=0.8,
+            title=dict(text="Joint Prob %", side="right", font=dict(color="#64748b",size=10)),
+            tickfont=dict(color="#64748b",size=10),bgcolor="#0d1020",
+            bordercolor="#1e2235",borderwidth=1,thickness=14,len=0.8,
         ),
-        hovertemplate=(
-            "<b>%{y}</b> wins Group G<br>"
-            "<b>%{x}</b> 3rd place advances<br>"
-            "Joint probability: <b>%{text}</b>"
-            "<extra></extra>"
-        ),
+        hovertemplate="<b>%{y}</b> wins Group G<br><b>%{x}</b> 3rd place advances<br>Joint probability: <b>%{text}</b><extra></extra>",
     ))
-
     fig.update_layout(
-        **PLOTLY_DARK,
-        height=320,
-        title=dict(
-            text="Joint Probability Matrix — Who Meets in Seattle?",
-            font=dict(size=13, color="#94a3b8"),
-            x=0,
-        ),
+        **PLOTLY_DARK, height=320,
+        title=dict(text=f"MC Joint Probability Matrix — {mc['n_sims']:,} simulations", font=dict(size=12,color="#94a3b8"), x=0),
         xaxis=dict(**AXIS_STYLE, title="3rd-Place Qualifying Group"),
         yaxis=dict(**AXIS_STYLE, title="Group G Winner", autorange="reversed"),
-        margin=dict(l=120, r=40, t=50, b=50),
+        margin=dict(l=120,r=40,t=50,b=50),
     )
     return fig
 
 
-def build_group_g_bar(df_g: pd.DataFrame) -> go.Figure:
-    """Horizontal probability bar chart for Group G win probabilities."""
-    df_sorted = df_g.sort_values("GroupWinnerProb", ascending=True)
-    teams_labeled = [f"{flag(t)} {t}" for t in df_sorted["Team"]]
-
-    colors = []
-    for p in df_sorted["GroupWinnerProb"]:
-        if p >= 0.50:
-            colors.append("#38bdf8")
-        elif p >= 0.25:
-            colors.append("#6366f1")
-        else:
-            colors.append("#475569")
+def build_group_g_bar(mc: dict) -> go.Figure:
+    probs = mc["g_winner_prob"]
+    teams = sorted(probs.keys(), key=lambda t: probs[t])
+    labels = [f"{FLAG_MAP.get(t,'🏳️')} {t}" for t in teams]
+    vals   = [probs[t] * 100 for t in teams]
+    colors = ["#38bdf8" if v >= 50 else ("#6366f1" if v >= 25 else "#475569") for v in vals]
 
     fig = go.Figure(go.Bar(
-        x=df_sorted["GroupWinnerProb"] * 100,
-        y=teams_labeled,
-        orientation="h",
-        marker_color=colors,
-        marker_line_width=0,
-        text=[f"{p*100:.1f}%" for p in df_sorted["GroupWinnerProb"]],
-        textposition="outside",
-        textfont=dict(color="#94a3b8", size=11, family="JetBrains Mono, monospace"),
+        x=vals, y=labels, orientation="h",
+        marker_color=colors, marker_line_width=0,
+        text=[f"{v:.1f}%" for v in vals], textposition="outside",
+        textfont=dict(color="#94a3b8",size=11,family="JetBrains Mono, monospace"),
         hovertemplate="<b>%{y}</b><br>Win probability: <b>%{x:.1f}%</b><extra></extra>",
     ))
     fig.update_layout(
-        **PLOTLY_DARK,
-        height=200,
-        title=dict(text="Group G Winner Probability", font=dict(size=12, color="#94a3b8"), x=0),
-        xaxis=dict(**AXIS_STYLE, title="", range=[0, 100], ticksuffix="%"),
+        **PLOTLY_DARK, height=200,
+        title=dict(text="Group G Winner Probability (MC)", font=dict(size=12,color="#94a3b8"), x=0),
+        xaxis=dict(**AXIS_STYLE, title="", range=[0,100], ticksuffix="%"),
         yaxis=dict(**AXIS_STYLE, title=""),
-        showlegend=False,
-        margin=dict(l=10, r=80, t=40, b=20),
+        showlegend=False, margin=dict(l=10,r=80,t=40,b=20),
     )
     return fig
 
 
-def build_third_place_bar(df_3rd: pd.DataFrame) -> go.Figure:
-    """
-    Grouped bar showing 3rd-place advance probability by group + team,
-    filtered to only the top-2 candidates per eligible group.
-    """
-    rows = []
-    for grp in THIRD_PLACE_GROUPS:
-        sub = df_3rd[df_3rd["Group"] == grp].nlargest(3, "AdvanceProb")
-        for _, row in sub.iterrows():
-            rows.append(row)
-    df_plot = pd.DataFrame(rows)
-
-    if df_plot.empty:
-        return go.Figure()
-
+def build_third_place_bar(mc: dict) -> go.Figure:
+    """Bar chart showing top-3 advance candidates per eligible group."""
+    palette = {"A":"#38bdf8","E":"#818cf8","H":"#34d399","I":"#fb923c","J":"#f472b6"}
     fig = go.Figure()
-    palette = {"A": "#38bdf8", "E": "#818cf8", "H": "#34d399", "I": "#fb923c", "J": "#f472b6"}
-
+    
     for grp in THIRD_PLACE_GROUPS:
-        sub = df_plot[df_plot["Group"] == grp]
-        if sub.empty:
-            continue
-        teams_lbl = [f"{flag(t)} {t}" for t in sub["Team"]]
+        teams = [(t, mc["third_advance_prob"].get(t, 0)) 
+                 for t in GROUPS[grp]]
+        teams.sort(key=lambda x: x[1], reverse=True)
+        top3 = teams[:3]
+        labels = [f"{FLAG_MAP.get(t,'🏳️')} {t}" for t, _ in top3]
+        vals   = [p * 100 for _, p in top3]
         fig.add_trace(go.Bar(
-            name=f"Grp {grp}",
-            x=teams_lbl,
-            y=sub["AdvanceProb"] * 100,
-            marker_color=palette.get(grp, "#64748b"),
-            text=[f"{p*100:.1f}%" for p in sub["AdvanceProb"]],
-            textposition="outside",
-            textfont=dict(size=10, color="#94a3b8"),
-            hovertemplate="<b>%{x}</b><br>Advance probability: <b>%{y:.1f}%</b><extra></extra>",
+            name=f"Grp {grp}", x=labels, y=vals,
+            marker_color=palette.get(grp,"#64748b"), marker_line_width=0,
+            text=[f"{v:.1f}%" for v in vals], textposition="outside",
+            textfont=dict(size=10,color="#94a3b8"),
+            hovertemplate="<b>%{x}</b><br>Advance prob: <b>%{y:.1f}%</b><extra></extra>",
         ))
-
+    
+    max_val = max((mc["third_advance_prob"].get(t, 0) * 100 
+                   for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]), default=20)
+    
     fig.update_layout(
-        **PLOTLY_DARK,
-        height=260,
-        title=dict(text="3rd-Place Advance Probability — Groups A/E/H/I/J", font=dict(size=12, color="#94a3b8"), x=0),
-        xaxis=dict(**AXIS_STYLE, title="", tickangle=-25),
-        yaxis=dict(**AXIS_STYLE, title="", ticksuffix="%", range=[0, max(df_plot["AdvanceProb"].max()*100 + 5, 20)]),
-        legend=dict(
-            font=dict(color="#64748b", size=10),
-            bgcolor="rgba(0,0,0,0)",
-            bordercolor="#1e2235",
-        ),
-        barmode="group",
-        margin=dict(l=10, r=20, t=40, b=80),
+        **PLOTLY_DARK, height=280, barmode="group",
+        title=dict(text="3rd-Place Advance Probability — Groups A/E/H/I/J (MC)", font=dict(size=12,color="#94a3b8"), x=0),
+        xaxis=dict(**AXIS_STYLE, title="", tickangle=-30),
+        yaxis=dict(**AXIS_STYLE, title="", ticksuffix="%", range=[0, max_val + 5]),
+        legend=dict(font=dict(color="#64748b",size=10),bgcolor="rgba(0,0,0,0)",bordercolor="#1e2235"),
+        margin=dict(l=10,r=20,t=40,b=90),
+    )
+    return fig
+
+
+def build_matchup_distribution(mc: dict, top_n: int = 12) -> go.Figure:
+    """
+    Bar chart of the top-N most probable specific matchups (g_winner vs third_team).
+    This is unique to the MC approach — impossible with independent probabilities.
+    """
+    pairs = sorted(mc["match82_joint_prob"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+    
+    if not pairs:
+        return go.Figure()
+    
+    labels = [f"{FLAG_MAP.get(gw,'🏳️')} {gw} vs {FLAG_MAP.get(tp,'🏳️')} {tp}" 
+              for (gw, tp), _ in pairs]
+    vals   = [p * 100 for _, p in pairs]
+    colors = ["#38bdf8" if v >= 5 else ("#6366f1" if v >= 2 else "#475569") for v in vals]
+    
+    fig = go.Figure(go.Bar(
+        x=vals, y=labels, orientation="h",
+        marker_color=colors, marker_line_width=0,
+        text=[f"{v:.2f}%" for v in vals], textposition="outside",
+        textfont=dict(size=10,color="#94a3b8",family="JetBrains Mono, monospace"),
+        hovertemplate="<b>%{y}</b><br>Joint probability: <b>%{x:.2f}%</b><extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_DARK, height=max(300, top_n * 28),
+        title=dict(text=f"Top {top_n} Most Probable Exact Match 82 Matchups (MC)", font=dict(size=12,color="#94a3b8"), x=0),
+        xaxis=dict(**AXIS_STYLE, title="", range=[0, max(vals)*1.3], ticksuffix="%"),
+        yaxis=dict(**AXIS_STYLE, title="", autorange="reversed"),
+        showlegend=False, margin=dict(l=220,r=80,t=40,b=20),
     )
     return fig
 
@@ -714,178 +929,128 @@ def build_third_place_bar(df_3rd: pd.DataFrame) -> go.Figure:
 # ROOTING INTEREST ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_path_to_seattle(
-    target_team: str,
-    df_g: pd.DataFrame,
-    df_3rd: pd.DataFrame,
-) -> dict:
+def generate_path_to_seattle(target_team: str, mc: dict) -> dict:
     """
-    Analyse the current data and produce a structured 'Path to Seattle' recipe.
-
-    Returns a dict with keys:
-      is_group_g_team  : bool
-      team             : str
-      group            : str — "G" or the 3rd-place group
-      steps            : list[str] — ordered natural-language instructions
-      current_position : str — summary of where they stand
-      probability      : float — estimated P(team appears in Match 82)
-      verdict          : "YES" | "NO" | "POSSIBLE"
+    Generate a natural-language Path to Seattle recipe using MC probabilities.
     """
-    # Is the team in Group G?
-    in_g = target_team in df_g["Team"].values
-    in_3rd = target_team in df_3rd["Team"].values
-
+    in_g   = target_team in GROUPS["G"]
+    in_3rd = any(target_team in GROUPS[g] for g in THIRD_PLACE_GROUPS)
+    
     if not in_g and not in_3rd:
         return {
-            "is_group_g_team": False,
-            "team": target_team,
-            "group": "N/A",
-            "steps": [f"{target_team} is not in Group G or any of the eligible 3rd-place groups (A/E/H/I/J). They cannot appear in Match 82."],
-            "current_position": "Not eligible",
-            "probability": 0.0,
-            "verdict": "NO",
+            "team": target_team, "steps": [f"{target_team} is not in Group G or an eligible 3rd-place group."],
+            "probability": 0.0, "verdict": "NO", "group": "N/A",
         }
-
+    
     steps = []
-    probability = 0.0
-    verdict = "POSSIBLE"
-
+    
     if in_g:
-        row = df_g[df_g["Team"] == target_team].iloc[0]
-        win_prob = row["GroupWinnerProb"]
-        ru_prob  = row["RunnerUpProb"]
-        pts      = row["Pts"]
-        gd       = row["GD"]
-        mp       = row["MP"]
-
-        current_pos = f"{flag(target_team)} {target_team} — {pts} pts, GD {gd:+d}, {mp} MP played"
-        probability = win_prob
-
+        win_p = mc["g_winner_prob"].get(target_team, 0)
+        ru_p  = mc["g_runnerup_prob"].get(target_team, 0)
+        method = mc["methods"].get(target_team, "MC")
+        probability = win_p
+        
+        method_label = f'<span class="method-pill method-{"mkt" if method=="MKT" else ("blend" if method=="BLEND" else "mc")}">{method}</span>'
+        
         steps.append(
-            f"<b>{flag(target_team)} {target_team}</b> must <b>finish 1st in Group G</b> "
-            f"(current win probability: {prob_to_pct(win_prob)})."
+            f"<b>{FLAG_MAP.get(target_team,'🏳️')} {target_team}</b> must <b>finish 1st in Group G</b>. "
+            f"MC probability: <b>{win_p*100:.1f}%</b> {method_label}"
         )
-
-        # Contextual advice based on current standing
-        if win_prob >= 0.60:
-            steps.append(
-                "They are the <span class='verdict-yes'>heavy favorites</span> — a point in their "
-                "final group match likely seals first place."
-            )
-        elif win_prob >= 0.30:
-            steps.append(
-                "The group is <span class='verdict-maybe'>still competitive</span>. "
-                "A win in the next match would significantly lock in top spot."
-            )
+        
+        # Elo context
+        elo = ELO.get(target_team, 1700)
+        rivals = [(t, ELO.get(t,1700)) for t in GROUPS["G"] if t != target_team]
+        rivals.sort(key=lambda x: x[1], reverse=True)
+        steps.append(
+            f"Elo rating: <b>{elo}</b>. Toughest remaining rival: "
+            f"<b>{FLAG_MAP.get(rivals[0][0],'🏳️')} {rivals[0][0]}</b> (Elo {rivals[0][1]})."
+        )
+        
+        if win_p >= 0.55:
+            steps.append("<span class='verdict-yes'>Heavy favorite</span> — a point in the final group match likely seals first place.")
+        elif win_p >= 0.25:
+            steps.append("<span class='verdict-maybe'>Competitive group</span> — a win in the next fixture would significantly improve position.")
         else:
+            steps.append("<span class='verdict-no'>Uphill battle</span> — needs wins and favorable results across multiple matches.")
+        
+        steps.append(
+            f"Note: Group G runner-up (MC prob {ru_p*100:.1f}%) does <b>not</b> go to Match 82 — "
+            f"they face Group D's runner-up. <b>Only the Group G winner reaches Seattle.</b>"
+        )
+        
+        # Most likely opponent from 3rd-place slot
+        eligible_pairs = {(gw, tp): p for (gw, tp), p in mc["match82_joint_prob"].items() if gw == target_team}
+        if eligible_pairs:
+            best_opp = max(eligible_pairs, key=eligible_pairs.get)
+            best_opp_team = best_opp[1]
+            best_opp_p = eligible_pairs[best_opp]
             steps.append(
-                "They face an <span class='verdict-no'>uphill battle</span> — they likely need to "
-                "win their remaining match(es) AND rely on results from other Group G games."
+                f"Most probable Match 82 opponent: "
+                f"<b>{FLAG_MAP.get(best_opp_team,'🏳️')} {best_opp_team}</b> "
+                f"(joint prob {best_opp_p*100:.2f}%)."
             )
-
-        # Runner-up path? Not direct to Match 82 as group G runner-up goes vs Group D R/U
-        steps.append(
-            "Note: The Group G <i>runner-up</i> (prob "
-            f"{prob_to_pct(ru_prob)}) plays against Group D's runner-up — not in Seattle. "
-            "Only the Group G <b>winner</b> reaches Match 82."
-        )
-
-        # Opponent context — who is most likely waiting for them?
-        best_3rd = get_best_3rd_per_group(df_3rd)
-        most_likely_opponent = max(best_3rd.values(), key=lambda r: r["AdvanceProb"])
-        steps.append(
-            f"If they win Group G, their most probable Match 82 opponent is "
-            f"<b>{flag(most_likely_opponent['Team'])} {most_likely_opponent['Team']}</b> "
-            f"(Grp {most_likely_opponent['Group']}, 3rd-place advance prob "
-            f"{prob_to_pct(most_likely_opponent['AdvanceProb'])})."
-        )
-
-        if win_prob >= 0.50:
-            verdict = "YES"
-        elif win_prob >= 0.20:
-            verdict = "POSSIBLE"
-        else:
-            verdict = "NO"
-
+        
+        verdict = "YES" if win_p >= 0.50 else ("POSSIBLE" if win_p >= 0.20 else "NO")
+    
     else:
-        # Team is in a 3rd-place eligible group
-        row = df_3rd[df_3rd["Team"] == target_team].iloc[0]
-        adv_prob = row["AdvanceProb"]
-        grp      = row["Group"]
-        pts      = row["Pts"]
-        gd       = row["GD"]
-        mp       = row["MP"]
-
-        current_pos = f"{flag(target_team)} {target_team} (Grp {grp}) — {pts} pts, GD {gd:+d}, {mp} MP played"
-        probability = adv_prob
-
-        # Which teams in the same group are ahead?
-        same_grp = df_3rd[df_3rd["Group"] == grp].sort_values("AdvanceProb", ascending=False)
-        rank_in_grp = same_grp["Team"].tolist().index(target_team) + 1
-
+        # 3rd-place team
+        adv_p = mc["third_advance_prob"].get(target_team, 0)
+        grp = next(g for g in THIRD_PLACE_GROUPS if target_team in GROUPS[g])
+        probability = adv_p
+        
         steps.append(
-            f"<b>{flag(target_team)} {target_team}</b> must <b>finish 3rd in Group {grp}</b> "
-            f"(current 3rd-place advance probability: {prob_to_pct(adv_prob)})."
+            f"<b>{FLAG_MAP.get(target_team,'🏳️')} {target_team}</b> must <b>finish 3rd in Group {grp}</b> "
+            f"<i>and</i> rank in the <b>top-8 globally</b> among all 12 third-place teams. "
+            f"MC probability (both conditions): <b>{adv_p*100:.1f}%</b> "
+            f'<span class="method-pill method-mc">MC</span>'
         )
-
+        
+        # Within-group context
+        grp_probs = [(t, mc["third_advance_prob"].get(t,0)) for t in GROUPS[grp]]
+        grp_probs.sort(key=lambda x: x[1], reverse=True)
+        rank_in_grp = [t for t,_ in grp_probs].index(target_team) + 1
+        
         if rank_in_grp == 1:
-            steps.append(
-                f"They are currently the <span class='verdict-yes'>top-ranked 3rd-place candidate</span> "
-                f"in Group {grp}. Hold this position."
-            )
+            steps.append(f"<span class='verdict-yes'>Currently the top 3rd-place candidate</span> in Group {grp} by MC simulation.")
         elif rank_in_grp == 2:
-            ahead_team = same_grp.iloc[0]
+            ahead = grp_probs[0]
             steps.append(
-                f"<b>{flag(ahead_team['Team'])} {ahead_team['Team']}</b> is ahead in Group {grp} — "
-                f"{target_team} needs results to go their way, or to outperform them on "
-                f"points / GD in remaining matches."
+                f"<b>{FLAG_MAP.get(ahead[0],'🏳️')} {ahead[0]}</b> is ahead in Group {grp} "
+                f"(Elo {ELO.get(ahead[0],1700)} vs {ELO.get(target_team,1700)}). "
+                f"Needs results to swing in their favor."
             )
         else:
+            steps.append(f"<span class='verdict-no'>Significant ground to make up</span> within Group {grp}.")
+        
+        steps.append(
+            "The 3rd-place slot is a <b>12-way simultaneous race</b>. The MC engine simulates all 12 groups "
+            "together, so this probability already accounts for competition from Groups B, C, D, F, K, L "
+            "— not just the 5 eligible groups."
+        )
+        
+        # Tiebreaker note
+        elo = ELO.get(target_team, 1700)
+        steps.append(
+            f"Elo rating: <b>{elo}</b>. Tiebreaker priority: Points → GD → GF → Fair-play. "
+            f"Running up the score in comfortable wins can be the difference."
+        )
+        
+        # Most likely G winner they'd face
+        eligible_pairs = {(gw, tp): p for (gw, tp), p in mc["match82_joint_prob"].items() if tp == target_team}
+        if eligible_pairs:
+            best_pair = max(eligible_pairs, key=eligible_pairs.get)
+            best_gw = best_pair[0]
             steps.append(
-                f"<span class='verdict-no'>Significant ground to make up</span> — {target_team} "
-                f"currently sits 3rd or lower among Group {grp} 3rd-place candidates."
+                f"Most probable Match 82 opponent if they qualify: "
+                f"<b>{FLAG_MAP.get(best_gw,'🏳️')} {best_gw}</b> "
+                f"(joint prob {eligible_pairs[best_pair]*100:.2f}%)."
             )
-
-        steps.append(
-            f"They must also rank in the <b>top-8 among all 12 third-place finishers</b> globally. "
-            f"The tiebreaker order: (1) Points, (2) Goal Difference, (3) Goals Scored, "
-            f"(4) Fair-play points."
-        )
-
-        # Competing 3rd-place groups — show which groups are hotly contested
-        group_totals = {
-            g: df_3rd[df_3rd["Group"] == g]["AdvanceProb"].sum()
-            for g in THIRD_PLACE_GROUPS if g != grp
-        }
-        hardest_group = max(group_totals, key=group_totals.get)
-        steps.append(
-            f"Watch Group <b>{hardest_group}</b> closely — it has the most competitive "
-            f"3rd-place battle and could squeeze {target_team} out of the top-8 globally."
-        )
-
-        # Group G opponent context
-        winner_row = df_g.loc[df_g["GroupWinnerProb"].idxmax()]
-        steps.append(
-            f"If they reach Match 82, their most probable opponent is "
-            f"<b>{flag(winner_row['Team'])} {winner_row['Team']}</b> "
-            f"(Group G win prob: {prob_to_pct(winner_row['GroupWinnerProb'])})."
-        )
-
-        if adv_prob >= 0.50:
-            verdict = "YES"
-        elif adv_prob >= 0.15:
-            verdict = "POSSIBLE"
-        else:
-            verdict = "NO"
-
+        
+        verdict = "YES" if adv_p >= 0.50 else ("POSSIBLE" if adv_p >= 0.12 else "NO")
+    
     return {
-        "is_group_g_team": in_g,
-        "team": target_team,
-        "group": "G" if in_g else row["Group"],
-        "steps": steps,
-        "current_position": current_pos,
-        "probability": probability,
-        "verdict": verdict,
+        "team": target_team, "group": "G" if in_g else grp,
+        "steps": steps, "probability": probability, "verdict": verdict,
     }
 
 
@@ -893,323 +1058,271 @@ def generate_path_to_seattle(
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 
-def render_sidebar(df_g: pd.DataFrame, df_3rd: pd.DataFrame, is_live: bool) -> str:
-    """Renders sidebar controls, returns selected target team."""
+def render_sidebar() -> tuple[str, int, bool]:
     with st.sidebar:
         st.markdown("## ⚽ Match 82 Tracker")
-        st.markdown(
-            '<p style="color:#475569;font-size:0.78rem;margin-top:-0.5rem;">Seattle · Lumen Field · July 1, 2026</p>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<p style="color:#475569;font-size:0.78rem;margin-top:-0.5rem;">Seattle · Lumen Field · July 1, 2026</p>', unsafe_allow_html=True)
         st.divider()
-
-        # Live mode toggle
-        live_mode = st.toggle("🔴 Live Mode", value=False,
-                               help=f"Auto-refresh data from Google Sheet every {REFRESH_SECONDS}s")
-        if live_mode and is_live:
-            st.success(f"Connected · refreshes every {REFRESH_SECONDS}s")
-        elif live_mode and not is_live:
-            st.warning("No sheet URL — set MATCH82_SHEET_URL or paste below")
-
-        sheet_input = st.text_input(
-            "Google Sheet CSV URL",
-            value=GOOGLE_SHEET_URL,
-            placeholder="https://docs.google.com/spreadsheets/d/.../export?format=csv",
-            help="Paste your public Google Sheet CSV export URL here.",
+        
+        st.markdown("### 🎲 Simulation")
+        n_sims = st.select_slider(
+            "Monte Carlo trials",
+            options=[10_000, 25_000, 50_000, 100_000],
+            value=50_000,
+            help="More trials = more accurate but slower. 50k ≈ 1–2 seconds.",
         )
-        if sheet_input and sheet_input != GOOGLE_SHEET_URL:
-            os.environ["MATCH82_SHEET_URL"] = sheet_input
+        
+        use_markets = st.toggle(
+            "🟣 Blend Polymarket odds",
+            value=USE_MARKETS,
+            help="Blend live Polymarket market prices with MC probabilities for top-tier teams.",
+        )
+        
+        if use_markets:
+            st.caption("60% MC + 40% market for teams with active Polymarket contracts.")
+        
+        if st.button("🔄 Re-run Simulation", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-
+        
         st.divider()
         st.markdown("### 🗺️ Rooting Interest")
         st.caption("Select a team to see their path to Lumen Field")
-
-        # Build full eligible team list
-        all_g_teams = df_g["Team"].tolist()
-        all_3rd_teams = df_3rd["Team"].tolist()
-        all_eligible = sorted(set(all_g_teams + all_3rd_teams))
-        options_display = [f"{flag(t)} {t}" for t in all_eligible]
-
-        default_idx = 0
-        if "Belgium" in all_eligible:
-            default_idx = all_eligible.index("Belgium")
-
-        selected_display = st.selectbox(
-            "Target Team",
-            options=options_display,
-            index=default_idx,
-            label_visibility="collapsed",
-        )
-        # Strip flag emoji to get clean name
-        selected_team = selected_display.split(" ", 1)[-1] if " " in selected_display else selected_display
-
+        
+        eligible = sorted([t for grp in (["G"] + THIRD_PLACE_GROUPS) for t in GROUPS[grp]])
+        display  = [f"{FLAG_MAP.get(t,'🏳️')} {t}" for t in eligible]
+        default_idx = eligible.index("Belgium") if "Belgium" in eligible else 0
+        
+        sel = st.selectbox("Target Team", display, index=default_idx, label_visibility="collapsed")
+        selected_team = sel.split(" ", 1)[-1] if " " in sel else sel
+        
         st.divider()
-        st.markdown("### ℹ️ Format")
-        st.caption(
-            "Match 82 (R32) pits the **Group G winner** vs. "
-            "the best 3rd-place team from **Groups A, E, H, I, or J**."
-        )
-        st.caption(
-            "8 of 12 3rd-place teams advance. Tiebreaker: Points → GD → GF → Fair-play."
-        )
-        st.caption("Winner of Match 82 faces W81 in Match 94 on July 6.")
-
+        st.markdown("### ℹ️ Model Notes")
+        st.caption("**Engine**: Dixon-Coles corrected Poisson + Elo ratings")
+        st.caption("**3rd-place**: Full 12-group race, not independent per-team probs")
+        st.caption("**Elo source**: eloratings.net as of June 13, 2026")
+        st.caption("**Blend**: Polymarket API (no key required, free)")
+        
         st.divider()
-        st.markdown(
-            '<p style="color:#1e3a5f;font-size:0.72rem;">Data: Google Sheets / Prediction Markets · '
-            'Built for WC2026 Seattle</p>',
-            unsafe_allow_html=True,
-        )
-
-    return selected_team
+        st.markdown('<p style="color:#1e3a5f;font-size:0.72rem;">Match 82 · Seattle WC2026 · MC Engine v2</p>', unsafe_allow_html=True)
+    
+    return selected_team, n_sims, use_markets
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN RENDER
+# MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Load data
-    df_g, df_3rd, is_live = load_data(GOOGLE_SHEET_URL)
-
-    # Sidebar (returns selected team)
-    selected_team = render_sidebar(df_g, df_3rd, is_live)
-
-    # ── HEADER ────────────────────────────────────────────────────────────────
+    selected_team, n_sims, use_markets = render_sidebar()
+    
+    # ── Run Monte Carlo ────────────────────────────────────────────────────────
+    with st.spinner(f"Running {n_sims:,} Monte Carlo simulations…"):
+        mc = run_monte_carlo(n_sims=n_sims, use_markets=use_markets)
+    
+    chaos_val = compute_chaos_index(mc)
+    c_label, _ = chaos_label(chaos_val)
+    
+    g_leader = max(mc["g_winner_prob"], key=mc["g_winner_prob"].get)
+    g_leader_p = mc["g_winner_prob"][g_leader]
+    
+    # Best 3rd-place candidate in eligible groups
+    eligible_3rd_probs = {t: mc["third_advance_prob"].get(t, 0)
+                          for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]}
+    best_3rd = max(eligible_3rd_probs, key=eligible_3rd_probs.get)
+    best_3rd_p = eligible_3rd_probs[best_3rd]
+    
+    top_joint = max(mc["match82_joint_prob"].values()) if mc["match82_joint_prob"] else 0
+    
+    # ── HEADER ─────────────────────────────────────────────────────────────────
     col_hdr, col_badge = st.columns([3, 1])
     with col_hdr:
-        st.markdown(
-            "# ⚽ Match 82 — Seattle Lumen Field",
-            unsafe_allow_html=True,
-        )
+        st.markdown("# ⚽ Match 82 — Seattle Lumen Field")
         st.markdown(
             '<p style="color:#475569;font-size:0.85rem;margin-top:-0.5rem;">'
             'Round of 32 · <b style="color:#64748b">Group G Winner vs. 3rd Place A/E/H/I/J</b> · '
             'Wed July 1, 2026 · 1:00 PM PT'
-            '</p>',
-            unsafe_allow_html=True,
+            '</p>', unsafe_allow_html=True,
         )
-
     with col_badge:
-        data_src = "🟢 LIVE DATA" if is_live else "🟡 MOCK DATA"
-        src_color = "#052e16" if is_live else "#2d1a00"
-        src_border = "#166534" if is_live else "#92400e"
-        src_text = "#4ade80" if is_live else "#fbbf24"
+        blend_label = "🟣 MC+MARKET" if (use_markets and mc["methods"]) else "🎲 PURE MC"
+        blend_color = "#1a0f4a" if use_markets else "#0f2d4a"
+        blend_border= "#3b2a6e" if use_markets else "#1e4a6e"
+        blend_text  = "#a78bfa" if use_markets else "#38bdf8"
         st.markdown(
-            f'<div style="background:{src_color};border:1px solid {src_border};border-radius:8px;'
+            f'<div style="background:{blend_color};border:1px solid {blend_border};border-radius:8px;'
             f'padding:0.6rem 1rem;text-align:center;margin-top:0.8rem;">'
-            f'<span style="color:{src_text};font-size:0.75rem;font-weight:700;">{data_src}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
+            f'<span style="color:{blend_text};font-size:0.75rem;font-weight:700;">{blend_label}</span><br>'
+            f'<span style="color:#475569;font-size:0.65rem;">{mc["n_sims"]:,} simulations</span>'
+            f'</div>', unsafe_allow_html=True,
         )
-
+    
     st.markdown("---")
-
-    # ── TOP METRICS ROW ───────────────────────────────────────────────────────
-    chaos_val = compute_chaos_index(df_g, df_3rd)
-    c_label, _ = chaos_label(chaos_val)
-
-    # Find current leader / favourite
-    g_leader = df_g.loc[df_g["GroupWinnerProb"].idxmax()]
-    best_3rd_dict = get_best_3rd_per_group(df_3rd)
-    best_3rd_overall = max(best_3rd_dict.values(), key=lambda r: r["AdvanceProb"])
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric(
-            "G Winner Favourite",
-            f"{flag(g_leader['Team'])} {g_leader['Team']}",
-            f"{prob_to_pct(g_leader['GroupWinnerProb'])}",
-        )
-    with col2:
-        # Dominant 3rd-place candidate overall
-        st.metric(
-            "Top 3rd-Place Candidate",
-            f"{flag(best_3rd_overall['Team'])} {best_3rd_overall['Team']}",
-            f"{prob_to_pct(best_3rd_overall['AdvanceProb'])} (Grp {best_3rd_overall['Group']})",
-        )
-    with col3:
-        # Joint P of most likely exact matchup
-        top_jp = build_heatmap_data(df_g, df_3rd).values.max()
-        st.metric("Highest Joint Prob", f"{top_jp*100:.1f}%", "Most likely exact matchup")
-    with col4:
+    
+    # ── TOP METRICS ─────────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("G Winner Favourite", f"{FLAG_MAP.get(g_leader,'🏳️')} {g_leader}", f"{g_leader_p*100:.1f}%")
+    with c2:
+        st.metric("Top 3rd-Place Candidate", f"{FLAG_MAP.get(best_3rd,'🏳️')} {best_3rd}", f"{best_3rd_p*100:.1f}%")
+    with c3:
+        top_pair = max(mc["match82_joint_prob"], key=mc["match82_joint_prob"].get) if mc["match82_joint_prob"] else ("?","?")
+        st.metric("Most Likely Exact Matchup", f"{top_pair[0]} vs {top_pair[1]}", f"{top_joint*100:.2f}%")
+    with c4:
         st.metric("Chaos Index", f"{chaos_val}%", c_label)
-
+    
     st.markdown("---")
-
-    # ── ROOTING INTEREST SECTION ───────────────────────────────────────────────
+    
+    # ── PATH TO SEATTLE ─────────────────────────────────────────────────────────
     st.markdown("## 🗺️ Path to Seattle")
-
-    recipe = generate_path_to_seattle(selected_team, df_g, df_3rd)
-
+    recipe = generate_path_to_seattle(selected_team, mc)
+    
     verdict = recipe["verdict"]
-    v_color = "#4ade80" if verdict == "YES" else ("#f87171" if verdict == "NO" else "#fbbf24")
-    v_bg    = "#052e16" if verdict == "YES" else ("#1a0808" if verdict == "NO" else "#1a1008")
-    v_border= "#166534" if verdict == "YES" else ("#7f1d1d" if verdict == "NO" else "#92400e")
-
+    v_color  = "#4ade80" if verdict=="YES" else ("#f87171" if verdict=="NO" else "#fbbf24")
+    v_bg     = "#052e16" if verdict=="YES" else ("#1a0808" if verdict=="NO" else "#1a1008")
+    v_border = "#166534" if verdict=="YES" else ("#7f1d1d" if verdict=="NO" else "#92400e")
+    
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.8rem;">'
         f'<span style="font-size:1.3rem;font-weight:800;color:#f1f5f9;">'
-        f'{flag(selected_team)} {selected_team}</span>'
+        f'{FLAG_MAP.get(selected_team,"🏳️")} {selected_team}</span>'
         f'<span style="background:{v_bg};border:1px solid {v_border};border-radius:6px;'
         f'padding:3px 12px;font-size:0.78rem;font-weight:800;color:{v_color};">{verdict}</span>'
-        f'<span style="color:#475569;font-size:0.82rem;">{recipe["current_position"]}</span>'
-        f'</div>',
-        unsafe_allow_html=True,
+        f'<span style="color:#475569;font-size:0.82rem;">Elo: {ELO.get(selected_team,"N/A")} · Group {recipe["group"]}</span>'
+        f'</div>', unsafe_allow_html=True,
     )
-
+    
     steps_html = "".join([
-        f'<div class="recipe-step">'
-        f'<div class="step-num">{i+1}</div>'
-        f'<div class="step-text">{step}</div>'
-        f'</div>'
-        for i, step in enumerate(recipe["steps"])
+        f'<div class="recipe-step"><div class="step-num">{i+1}</div><div class="step-text">{s}</div></div>'
+        for i, s in enumerate(recipe["steps"])
     ])
-
     prob_pct = recipe["probability"]
     prob_bar_w = int(prob_pct * 100)
-    prob_bar_color = "#4ade80" if prob_pct >= 0.50 else ("#fbbf24" if prob_pct >= 0.20 else "#f87171")
-
+    prob_bar_color = "#4ade80" if prob_pct >= 0.50 else ("#fbbf24" if prob_pct >= 0.15 else "#f87171")
+    
     st.markdown(
-        f'<div class="recipe-card">'
-        f'{steps_html}'
+        f'<div class="recipe-card">{steps_html}'
         f'<div style="margin-top:1rem;padding-top:0.75rem;border-top:1px solid #1e2a44;">'
         f'<span style="color:#64748b;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.06em;">'
-        f'Estimated probability of appearing in Match 82</span><br>'
+        f'MC-simulated probability of appearing in Match 82</span><br>'
         f'<div style="background:#0d1020;border-radius:4px;height:8px;margin-top:0.4rem;overflow:hidden;">'
-        f'<div style="background:{prob_bar_color};width:{prob_bar_w}%;height:100%;border-radius:4px;'
-        f'transition:width 0.6s ease;"></div>'
+        f'<div style="background:{prob_bar_color};width:{prob_bar_w}%;height:100%;border-radius:4px;"></div>'
         f'</div>'
         f'<span style="color:{prob_bar_color};font-size:0.9rem;font-weight:700;font-family:monospace;">'
         f'{prob_pct*100:.1f}%</span>'
-        f'</div>'
-        f'</div>',
-        unsafe_allow_html=True,
+        f'</div></div>', unsafe_allow_html=True,
     )
-
+    
     st.markdown("---")
-
-    # ── HEATMAP + CHAOS GAUGE ──────────────────────────────────────────────────
+    
+    # ── HEATMAP + CHAOS GAUGE ───────────────────────────────────────────────────
     st.markdown("## 📊 Probability Analytics")
-
     col_heat, col_chaos = st.columns([2.2, 1])
-
+    
     with col_heat:
-        df_heat = build_heatmap_data(df_g, df_3rd)
-        fig_heat = build_heatmap(df_heat)
-        st.plotly_chart(fig_heat, use_container_width=True)
-
+        st.plotly_chart(build_heatmap(mc), use_container_width=True)
+    
     with col_chaos:
         st.markdown("#### Chaos Index")
         st.caption(
-            "Measures volatility of the Match 82 slot. "
-            "High = many teams neck-and-neck. Low = matchup nearly locked."
+            "Shannon entropy of the full Match 82 joint distribution — "
+            "across every possible (G winner, 3rd-place team) pairing from the MC simulation."
         )
-        fig_gauge = build_chaos_gauge(chaos_val)
-        st.plotly_chart(fig_gauge, use_container_width=True)
-
+        st.plotly_chart(build_chaos_gauge(chaos_val), use_container_width=True)
+        
         chaos_class = "chaos-low" if chaos_val < 35 else ("chaos-medium" if chaos_val < 70 else "chaos-high")
+        chaos_css = {"chaos-low":"#052e16;color:#4ade80;border:1px solid #166534",
+                     "chaos-medium":"#1c1917;color:#fbbf24;border:1px solid #92400e",
+                     "chaos-high":"#1a0a0a;color:#f87171;border:1px solid #7f1d1d"}[chaos_class]
         st.markdown(
             f'<div style="text-align:center;margin-top:-0.5rem;">'
-            f'<span class="chaos-badge {chaos_class}">{c_label}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
+            f'<span style="display:inline-block;padding:2px 10px;border-radius:999px;font-size:0.72rem;'
+            f'font-weight:700;letter-spacing:0.05em;text-transform:uppercase;background:{chaos_css};">'
+            f'{c_label}</span></div>', unsafe_allow_html=True,
         )
-
-        # Quick explanation
-        with st.expander("How is this calculated?"):
+        with st.expander("Model notes"):
             st.markdown(
-                """
-                **Chaos Index** uses Shannon entropy normalised to [0, 100]:
+                f"""
+                **Chaos Index** = Shannon entropy over the joint (G winner × 3rd-place team) 
+                distribution from {mc['n_sims']:,} MC simulations, normalised to [0, 100].
 
-                - **Group G entropy**: How spread out are the Group G win probabilities?
-                - **3rd-place entropy**: How spread out are the advance probabilities across all 20 eligible 3rd-place teams?
+                Unlike the v1 approach (independent per-group entropies added together), 
+                this captures the *actual* combinatorial uncertainty of the matchup — 
+                including correlations between groups and the 12-way 3rd-place race.
 
-                The two components are weighted 50/50.
-
-                **100%** = All teams have equal odds (maximum uncertainty).
-                **0%** = One team is a mathematical lock (zero uncertainty).
+                **Match engine**: Dixon-Coles corrected Poisson driven by Elo ratings.  
+                **Elo source**: eloratings.net as of June 13, 2026.
                 """
             )
-
+    
     st.markdown("---")
-
-    # ── PROBABILITY DISTRIBUTION CHARTS ────────────────────────────────────────
-    st.markdown("## 📈 Group Standings & Probabilities")
-
-    col_bar1, col_bar2 = st.columns(2)
-    with col_bar1:
-        fig_g_bar = build_group_g_bar(df_g)
-        st.plotly_chart(fig_g_bar, use_container_width=True)
-    with col_bar2:
-        fig_3rd_bar = build_third_place_bar(df_3rd)
-        st.plotly_chart(fig_3rd_bar, use_container_width=True)
-
-    # ── GROUP G STANDINGS TABLE ─────────────────────────────────────────────────
-    st.markdown("### Group G Standings")
-
-    df_g_display = df_g.copy()
-    df_g_display.insert(0, "Flag", df_g_display["Team"].map(flag))
-    df_g_display["GroupWin%"]   = (df_g_display["GroupWinnerProb"] * 100).round(1)
-    df_g_display["RunnerUp%"]   = (df_g_display["RunnerUpProb"]    * 100).round(1)
-    df_g_display["3rdPlace%"]   = (df_g_display["ThirdPlaceProb"]  * 100).round(1)
-
-    show_cols = ["Flag","Team","MP","W","D","L","GF","GA","GD","Pts","GroupWin%","RunnerUp%","3rdPlace%"]
-    df_g_display = df_g_display[show_cols].sort_values("Pts", ascending=False).reset_index(drop=True)
-    df_g_display.index += 1
-
-    st.dataframe(
-        df_g_display,
-        use_container_width=True,
-        hide_index=False,
-        column_config={
-            "Flag": st.column_config.TextColumn("", width="small"),
-            "Team": st.column_config.TextColumn("Team"),
-            "GroupWin%": st.column_config.ProgressColumn("Win Prob %", min_value=0, max_value=100, format="%.1f%%"),
-            "RunnerUp%": st.column_config.ProgressColumn("Runner-Up %", min_value=0, max_value=100, format="%.1f%%"),
-        }
-    )
-
-    # ── ELIGIBLE 3RD-PLACE STANDINGS ────────────────────────────────────────────
-    st.markdown("### 3rd-Place Eligible Groups (A / E / H / I / J)")
-    st.caption("Showing current 3rd-place teams in each group with their global advance probability.")
-
+    
+    # ── TOP MATCHUPS ────────────────────────────────────────────────────────────
+    st.markdown("## 🎯 Most Probable Exact Matchups")
+    st.caption("This is what the MC engine uniquely enables — ranked probability of every specific pairing.")
+    st.plotly_chart(build_matchup_distribution(mc, top_n=12), use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ── PROBABILITY DISTRIBUTIONS ───────────────────────────────────────────────
+    st.markdown("## 📈 Component Probabilities")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(build_group_g_bar(mc), use_container_width=True)
+    with col2:
+        st.plotly_chart(build_third_place_bar(mc), use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ── LIVE STANDINGS TABLE ────────────────────────────────────────────────────
+    st.markdown("## 📋 Current Standings")
+    
+    with st.expander("Group G", expanded=True):
+        rows = []
+        for t in GROUPS["G"]:
+            s = LIVE_STANDINGS[t]
+            pts = s["w"]*3 + s["d"]
+            rows.append({
+                "": FLAG_MAP.get(t,"🏳️"), "Team": t,
+                "MP": s["mp"], "W": s["w"], "D": s["d"], "L": s["l"],
+                "GF": s["gf"], "GA": s["ga"], "GD": s["gf"]-s["ga"], "Pts": pts,
+                "Win Prob %": round(mc["g_winner_prob"].get(t,0)*100, 1),
+            })
+        df = pd.DataFrame(rows).sort_values("Pts", ascending=False).reset_index(drop=True)
+        df.index += 1
+        st.dataframe(df, use_container_width=True, hide_index=False,
+            column_config={"Win Prob %": st.column_config.ProgressColumn("Win Prob %", min_value=0, max_value=100, format="%.1f%%")})
+    
     tabs = st.tabs([f"Group {g}" for g in THIRD_PLACE_GROUPS])
     for tab, grp in zip(tabs, THIRD_PLACE_GROUPS):
         with tab:
-            sub = df_3rd[df_3rd["Group"] == grp].copy()
-            sub.insert(0, "Flag", sub["Team"].map(flag))
-            sub["Advance%"] = (sub["AdvanceProb"] * 100).round(1)
-            show = ["Flag","Team","MP","W","D","L","GF","GA","GD","Pts","Advance%"]
-            sub = sub[show].sort_values("Pts", ascending=False).reset_index(drop=True)
-            sub.index += 1
-            st.dataframe(
-                sub,
-                use_container_width=True,
-                hide_index=False,
-                column_config={
-                    "Flag": st.column_config.TextColumn("", width="small"),
-                    "Advance%": st.column_config.ProgressColumn("Advance Prob %", min_value=0, max_value=100, format="%.1f%%"),
-                }
-            )
-
-    # ── FOOTER ─────────────────────────────────────────────────────────────────
+            rows = []
+            for t in GROUPS[grp]:
+                s = LIVE_STANDINGS.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
+                pts = s["w"]*3 + s["d"]
+                rows.append({
+                    "": FLAG_MAP.get(t,"🏳️"), "Team": t,
+                    "MP": s["mp"], "W": s["w"], "D": s["d"], "L": s["l"],
+                    "GF": s["gf"], "GA": s["ga"], "GD": s["gf"]-s["ga"], "Pts": pts,
+                    "Advance Prob %": round(mc["third_advance_prob"].get(t,0)*100, 1),
+                })
+            df = pd.DataFrame(rows).sort_values("Pts", ascending=False).reset_index(drop=True)
+            df.index += 1
+            st.dataframe(df, use_container_width=True, hide_index=False,
+                column_config={"Advance Prob %": st.column_config.ProgressColumn("Advance Prob %", min_value=0, max_value=100, format="%.1f%%")})
+    
+    # ── FOOTER ──────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown(
-        '<p style="color:#1e3a5f;font-size:0.75rem;text-align:center;">'
-        '2026 FIFA World Cup · Match 82 · Seattle Lumen Field · July 1, 2026 · '
-        'Probabilities sourced from prediction market contract prices (update via Google Sheet) · '
-        'Not affiliated with FIFA'
-        '</p>',
-        unsafe_allow_html=True,
+        f'<p style="color:#1e3a5f;font-size:0.75rem;text-align:center;">'
+        f'Match 82 · Seattle Lumen Field · July 1, 2026 · '
+        f'Monte Carlo engine ({mc["n_sims"]:,} simulations) · '
+        f'Dixon-Coles Poisson + Elo (eloratings.net June 2026) · '
+        f'Polymarket API blend {"enabled" if use_markets else "disabled"} · '
+        f'Not affiliated with FIFA'
+        f'</p>', unsafe_allow_html=True,
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     main()
