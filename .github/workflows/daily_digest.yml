@@ -1,0 +1,42 @@
+# .github/workflows/daily_digest.yml
+#
+# Sends the daily Match 82 email digest at 7:30 AM PT (14:30 UTC).
+# Runs 30 minutes AFTER nightly_precompute.yml (07:00 AM PT) so
+# results.json is guaranteed to be fresh when this job starts.
+#
+# Required secrets (Settings → Secrets and variables → Actions):
+#   OPENAI_API_KEY   — for gpt-4o-mini paragraph generation
+#   RESEND_API_KEY   — for email delivery via resend.com
+#
+# To test manually: Actions → "Daily Digest Sender" → Run workflow
+
+name: Daily Digest Sender
+
+on:
+  schedule:
+    - cron: '30 14 * * *'   # 07:30 AM PT / 10:30 AM ET (UTC-7 during group stage)
+  workflow_dispatch:         # Allow manual trigger from Actions tab
+
+jobs:
+  send_digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send digest
+        run: python send_digest.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
