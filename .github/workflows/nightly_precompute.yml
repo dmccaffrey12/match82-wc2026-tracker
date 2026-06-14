@@ -1,0 +1,52 @@
+# .github/workflows/nightly_precompute.yml
+#
+# Runs the Monte Carlo simulation each morning at 7 AM PT (14:00 UTC)
+# and commits the results.json snapshot back to the repo.
+#
+# Streamlit Community Cloud auto-redeploys on every push to main,
+# so subscribers who load the app after 7 AM PT see the fresh snapshot
+# from that morning — reflecting the previous evening's final results.
+#
+# To trigger manually: Actions → "Nightly MC Pre-compute" → Run workflow
+
+name: Nightly MC Pre-compute
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 07:00 AM PT / 10:00 AM ET (UTC-7 during group stage)
+  workflow_dispatch:        # Allow manual trigger from Actions tab
+
+permissions:
+  contents: write           # Needed to commit results.json back to main
+
+jobs:
+  precompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Monte Carlo pre-computation
+        run: python precompute.py --sims 50000
+
+      - name: Commit results.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results.json
+          # Only commit if results.json actually changed
+          git diff --staged --quiet || git commit -m "chore: nightly MC snapshot $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push

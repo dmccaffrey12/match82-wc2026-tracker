@@ -25,6 +25,8 @@ HOW TO ENABLE LIVE POLYMARKET ODDS:
 import os
 import math
 import time
+import json
+import datetime
 import requests
 import numpy as np
 import pandas as pd
@@ -56,6 +58,45 @@ THIRD_PLACE_GROUPS = ["A", "E", "H", "I", "J"]
 
 # All 12 groups needed for the global 3rd-place ranking simulation
 ALL_GROUPS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+
+# Path to pre-computed results written by precompute.py / GitHub Actions
+RESULTS_JSON = os.path.join(os.path.dirname(__file__), "results.json")
+RESULTS_MAX_AGE_HOURS = 25   # Accept snapshot up to 25 hours old before warning
+
+
+def load_precomputed_results() -> dict | None:
+    """
+    Load the pre-computed Monte Carlo snapshot from results.json.
+
+    Returns the deserialized MC dict if the file exists and is fresh
+    (< RESULTS_MAX_AGE_HOURS old), otherwise returns None so the app
+    falls back to a live simulation.
+    """
+    if not os.path.exists(RESULTS_JSON):
+        return None
+    try:
+        with open(RESULTS_JSON) as f:
+            data = json.load(f)
+        # Restore tuple keys in match82_joint_prob
+        joint = {}
+        for key_str, v in data.get("match82_joint_prob", {}).items():
+            parts = key_str.split(" vs ", 1)
+            joint[tuple(parts) if len(parts) == 2 else (key_str, "TBD")] = v
+        data["match82_joint_prob"] = joint
+        # Check freshness
+        computed_at_str = data.get("computed_at", "")
+        if computed_at_str:
+            computed_at = datetime.datetime.fromisoformat(computed_at_str.replace("Z", "+00:00"))
+            age_hours = (datetime.datetime.now(datetime.timezone.utc) - computed_at).total_seconds() / 3600
+            data["_age_hours"] = round(age_hours, 1)
+            data["_stale"] = age_hours > RESULTS_MAX_AGE_HOURS
+        else:
+            data["_age_hours"] = None
+            data["_stale"] = False
+        data["_precomputed"] = True
+        return data
+    except Exception:
+        return None
 
 FLAG_MAP: dict[str, str] = {
     "Belgium": "🇧🇪", "Egypt": "🇪🇬", "Iran": "🇮🇷", "New Zealand": "🇳🇿",
@@ -309,6 +350,54 @@ DARK_CSS = """
   .method-mc { background: #0f2d4a; color: #38bdf8; border: 1px solid #1e4a6e; }
   .method-mkt { background: #1a0f4a; color: #a78bfa; border: 1px solid #3b2a6e; }
   .method-blend { background: #1a2e0f; color: #86efac; border: 1px solid #2a4e1e; }
+
+  /* ── Mobile responsiveness ── */
+  @media (max-width: 768px) {
+    /* Tighter page padding on small screens */
+    .block-container { padding: 0.75rem 0.85rem 1.5rem !important; }
+
+    /* Stack metric cards in a 2x2 grid instead of 4-across */
+    [data-testid="stHorizontalBlock"] {
+      flex-wrap: wrap !important;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="stVerticalBlock"] {
+      min-width: 46% !important;
+      flex: 1 1 46% !important;
+    }
+
+    /* Shrink metric values slightly so they don't overflow */
+    [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.62rem !important; }
+
+    /* Title sizing */
+    h1 { font-size: 1.25rem !important; }
+    h2 { font-size: 0.7rem !important; }
+
+    /* Hide sidebar by default on mobile (user taps hamburger to open) */
+    section[data-testid="stSidebar"] { width: 85vw !important; }
+
+    /* Plotly charts — ensure they don't overflow horizontally */
+    .js-plotly-plot, .plotly { max-width: 100% !important; overflow-x: hidden !important; }
+
+    /* Path to Seattle card — tighter on mobile */
+    .recipe-card { padding: 0.8rem 1rem !important; }
+    .step-text { font-size: 0.82rem !important; }
+
+    /* Digest form columns — stack vertically */
+    /* Streamlit columns can't truly reflow but we can compress the form side */
+    [data-testid="stForm"] { padding: 0 !important; }
+  }
+
+  @media (max-width: 480px) {
+    /* Phone — single column feel */
+    .block-container { padding: 0.5rem 0.6rem 1rem !important; }
+    [data-testid="stMetricValue"] { font-size: 0.92rem !important; }
+    h1 { font-size: 1.1rem !important; }
+    /* Make the badge block stack below the title */
+    [data-testid="stHorizontalBlock"]:first-of-type > [data-testid="stVerticalBlock"]:last-child {
+      min-width: 100% !important;
+    }
+  }
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
@@ -1108,7 +1197,25 @@ def render_sidebar() -> tuple[str, int, bool]:
         st.caption("**3rd-place**: Full 12-group race, not independent per-team probs")
         st.caption("**Elo source**: eloratings.net as of June 13, 2026")
         st.caption("**Blend**: Polymarket API (no key required, free)")
-        
+
+        # Show snapshot status
+        snap = load_precomputed_results()
+        if snap:
+            age = snap.get("_age_hours")
+            stale = snap.get("_stale", False)
+            age_str = f"{age}h ago" if age is not None else "cached"
+            color = "#f87171" if stale else "#4ade80"
+            label = f"⚠ Snapshot {age_str} (stale)" if stale else f"✓ Snapshot {age_str}"
+            st.markdown(
+                f'<p style="color:{color};font-size:0.72rem;margin-top:0.3rem;">{label}</p>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<p style="color:#475569;font-size:0.72rem;margin-top:0.3rem;">No snapshot — live sim</p>',
+                unsafe_allow_html=True,
+            )
+
         st.divider()
         st.markdown('<p style="color:#1e3a5f;font-size:0.72rem;">Match 82 · Seattle WC2026 · MC Engine v2</p>', unsafe_allow_html=True)
     
@@ -1537,10 +1644,30 @@ def render_digest_section(mc: dict) -> None:
 
 def main() -> None:
     selected_team, n_sims, use_markets = render_sidebar()
-    
-    # ── Run Monte Carlo ────────────────────────────────────────────────────────
-    with st.spinner(f"Running {n_sims:,} Monte Carlo simulations…"):
-        mc = run_monte_carlo(n_sims=n_sims, use_markets=use_markets)
+
+    # ── Load pre-computed snapshot or run live simulation ─────────────────────
+    precomputed = load_precomputed_results()
+    if precomputed and not use_markets:
+        mc = precomputed
+        age = mc.get("_age_hours")
+        stale = mc.get("_stale", False)
+        if stale:
+            st.warning(
+                f"⚠️ Pre-computed snapshot is {age}h old — standings may be outdated. "
+                f"Click **Re-run Simulation** in the sidebar for fresh numbers.",
+                icon="⏰",
+            )
+        else:
+            age_str = f"{age}h ago" if age is not None else "recently"
+            st.info(
+                f"⚡ Loaded pre-computed snapshot ({age_str}) — instant load. "
+                f"Use sidebar to re-run a live simulation.",
+                icon="📊",
+            )
+    else:
+        reason = "Polymarket blend requires live simulation" if use_markets else "No pre-computed snapshot found"
+        with st.spinner(f"Running {n_sims:,} Monte Carlo simulations… ({reason})"):
+            mc = run_monte_carlo(n_sims=n_sims, use_markets=use_markets)
     
     chaos_val = compute_chaos_index(mc)
     c_label, _ = chaos_label(chaos_val)
