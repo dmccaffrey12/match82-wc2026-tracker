@@ -751,8 +751,12 @@ PLOTLY_DARK = dict(
     paper_bgcolor="#0a0c14",
     plot_bgcolor="#0a0c14",
     font=dict(color="#94a3b8", family="Inter, system-ui, sans-serif", size=12),
-    margin=dict(l=10, r=10, t=40, b=10),
+    # No margin here — each chart sets its own to avoid duplicate-kwarg TypeError
 )
+
+def _dark(**overrides):
+    """Return PLOTLY_DARK merged with per-chart overrides (safe, no duplicate keys)."""
+    return {**PLOTLY_DARK, **overrides}
 AXIS_STYLE = dict(
     gridcolor="#1e2235", zerolinecolor="#1e2235",
     tickfont=dict(color="#64748b", size=11),
@@ -782,7 +786,7 @@ def build_chaos_gauge(chaos_index: float) -> go.Figure:
         title=dict(text=f"<b>{label}</b>", font=dict(size=13, color=bar_color)),
         domain=dict(x=[0,1], y=[0,1]),
     ))
-    fig.update_layout(**PLOTLY_DARK, height=280, margin=dict(l=30,r=30,t=30,b=5))
+    fig.update_layout(**_dark(height=280, margin=dict(l=30,r=30,t=30,b=5)))
     return fig
 
 
@@ -829,7 +833,7 @@ def build_heatmap(mc: dict) -> go.Figure:
         hovertemplate="<b>%{y}</b> wins Group G<br><b>%{x}</b> 3rd place advances<br>Joint probability: <b>%{text}</b><extra></extra>",
     ))
     fig.update_layout(
-        **PLOTLY_DARK, height=320,
+        **_dark(height=320),
         title=dict(text=f"MC Joint Probability Matrix — {mc['n_sims']:,} simulations", font=dict(size=12,color="#94a3b8"), x=0),
         xaxis=dict(**AXIS_STYLE, title="3rd-Place Qualifying Group"),
         yaxis=dict(**AXIS_STYLE, title="Group G Winner", autorange="reversed"),
@@ -853,11 +857,11 @@ def build_group_g_bar(mc: dict) -> go.Figure:
         hovertemplate="<b>%{y}</b><br>Win probability: <b>%{x:.1f}%</b><extra></extra>",
     ))
     fig.update_layout(
-        **PLOTLY_DARK, height=200,
+        **_dark(height=200, margin=dict(l=10,r=80,t=40,b=20)),
         title=dict(text="Group G Winner Probability (MC)", font=dict(size=12,color="#94a3b8"), x=0),
         xaxis=dict(**AXIS_STYLE, title="", range=[0,100], ticksuffix="%"),
         yaxis=dict(**AXIS_STYLE, title=""),
-        showlegend=False, margin=dict(l=10,r=80,t=40,b=20),
+        showlegend=False,
     )
     return fig
 
@@ -886,12 +890,11 @@ def build_third_place_bar(mc: dict) -> go.Figure:
                    for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]), default=20)
     
     fig.update_layout(
-        **PLOTLY_DARK, height=280, barmode="group",
+        **_dark(height=280, margin=dict(l=10,r=20,t=40,b=90), barmode="group"),
         title=dict(text="3rd-Place Advance Probability — Groups A/E/H/I/J (MC)", font=dict(size=12,color="#94a3b8"), x=0),
         xaxis=dict(**AXIS_STYLE, title="", tickangle=-30),
         yaxis=dict(**AXIS_STYLE, title="", ticksuffix="%", range=[0, max_val + 5]),
         legend=dict(font=dict(color="#64748b",size=10),bgcolor="rgba(0,0,0,0)",bordercolor="#1e2235"),
-        margin=dict(l=10,r=20,t=40,b=90),
     )
     return fig
 
@@ -919,11 +922,11 @@ def build_matchup_distribution(mc: dict, top_n: int = 12) -> go.Figure:
         hovertemplate="<b>%{y}</b><br>Joint probability: <b>%{x:.2f}%</b><extra></extra>",
     ))
     fig.update_layout(
-        **PLOTLY_DARK, height=max(300, top_n * 28),
+        **_dark(height=max(300, top_n * 28), margin=dict(l=220,r=80,t=40,b=20)),
         title=dict(text=f"Top {top_n} Most Probable Exact Match 82 Matchups (MC)", font=dict(size=12,color="#94a3b8"), x=0),
         xaxis=dict(**AXIS_STYLE, title="", range=[0, max(vals)*1.3], ticksuffix="%"),
         yaxis=dict(**AXIS_STYLE, title="", autorange="reversed"),
-        showlegend=False, margin=dict(l=220,r=80,t=40,b=20),
+        showlegend=False,
     )
     return fig
 
