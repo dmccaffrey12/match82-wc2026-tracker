@@ -279,12 +279,15 @@ DARK_CSS = """
   .block-container { padding: 1.5rem 2rem 2rem !important; max-width: 1400px !important; }
   [data-testid="stSidebar"] { background: #0d1020 !important; border-right: 1px solid #1e2235 !important; }
   [data-testid="stSidebar"] * { color: #cbd5e1 !important; }
-  [data-testid="stMetric"] { background: #111627 !important; border: 1px solid #1e2a44 !important; border-radius: 10px !important; padding: 1rem 1.25rem !important; }
-  [data-testid="stMetricLabel"] { font-size: 0.7rem !important; text-transform: uppercase !important; letter-spacing: 0.08em !important; color: #64748b !important; }
-  [data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 700 !important; color: #38bdf8 !important; }
+  /* ── Metric cards ── */
+  [data-testid="stMetric"] { background: #111627 !important; border: 1px solid #1e2a44 !important; border-radius: 10px !important; padding: 1rem 1.25rem !important; overflow: hidden !important; }
+  [data-testid="stMetricLabel"] { font-size: 0.68rem !important; text-transform: uppercase !important; letter-spacing: 0.07em !important; color: #64748b !important; white-space: normal !important; overflow: visible !important; text-overflow: unset !important; line-height: 1.3 !important; }
+  [data-testid="stMetricValue"] { font-size: 1.35rem !important; font-weight: 700 !important; color: #38bdf8 !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+  [data-testid="stMetricDelta"] { font-size: 0.78rem !important; color: #4ade80 !important; }
   [data-testid="stMetricDelta"] svg { display: none; }
-  h1 { font-size: 1.6rem !important; font-weight: 800 !important; color: #f1f5f9 !important; }
-  h2 { font-size: 1.05rem !important; font-weight: 700 !important; color: #94a3b8 !important; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid #1e2235; padding-bottom: 0.4rem; margin-top: 1.5rem !important; }
+  /* ── Headings ── */
+  h1 { font-size: 1.75rem !important; font-weight: 800 !important; color: #f8fafc !important; letter-spacing: -0.02em !important; }
+  h2 { font-size: 0.78rem !important; font-weight: 700 !important; color: #475569 !important; text-transform: uppercase !important; letter-spacing: 0.1em !important; border-bottom: 1px solid #1e2235 !important; padding-bottom: 0.5rem !important; margin-top: 1.8rem !important; margin-bottom: 0.8rem !important; }
   h3 { font-size: 1rem !important; font-weight: 600 !important; color: #e2e8f0 !important; }
   [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
   [data-baseweb="select"] > div { background: #111627 !important; border-color: #1e2a44 !important; border-radius: 8px !important; }
@@ -1110,6 +1113,260 @@ def render_sidebar() -> tuple[str, int, bool]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DAILY DIGEST ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_digest_paragraph(mc: dict) -> str:
+    """
+    Generate a daily odds-movement narrative paragraph based on current MC output.
+
+    In production, this function would be called by a scheduled job (e.g., a GitHub
+    Actions cron, a Streamlit cron, or a simple cloud function) that:
+      1. Runs the MC simulation against live standings
+      2. Compares today's probabilities to yesterday's stored snapshot
+      3. Passes the delta to an LLM (e.g. OpenAI gpt-4o-mini) to write the paragraph
+      4. Sends the result to all subscribers via an email API (e.g. Resend / SendGrid)
+
+    For now, this is a template-based generator that demonstrates the full output
+    format. Swap the return statement for an OpenAI API call when you have a key.
+    """
+    import datetime
+
+    today = datetime.date.today().strftime("%B %d, %Y")
+    g_probs = mc["g_winner_prob"]
+    g_leader = max(g_probs, key=g_probs.get)
+    g_leader_p = g_probs[g_leader]
+    g_sorted = sorted(g_probs.items(), key=lambda x: x[1], reverse=True)
+
+    # Top 3rd-place candidates overall (eligible groups)
+    eligible_3rd = {t: mc["third_advance_prob"].get(t, 0)
+                    for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]}
+    top_3rd = sorted(eligible_3rd.items(), key=lambda x: x[1], reverse=True)[:3]
+
+    # Top exact matchup
+    top_pair = max(mc["match82_joint_prob"], key=mc["match82_joint_prob"].get) \
+               if mc["match82_joint_prob"] else ("TBD", "TBD")
+    top_pair_p = mc["match82_joint_prob"].get(top_pair, 0)
+
+    chaos = compute_chaos_index(mc)
+    _, chaos_class = chaos_label(chaos)
+
+    # —— Compose the paragraph ——
+    # (In production, pass this context dict to gpt-4o-mini with a system prompt
+    # instructing it to write one punchy paragraph in the style of a smart sports analyst.)
+    g2 = g_sorted[1] if len(g_sorted) > 1 else ("TBD", 0)
+    g3 = g_sorted[2] if len(g_sorted) > 2 else ("TBD", 0)
+
+    para = (
+        f"**Match 82 Daily Brief — {today}**\n\n"
+        f"{FLAG_MAP.get(g_leader,'')} **{g_leader}** remains the Group G frontrunner "
+        f"at **{g_leader_p*100:.1f}%** to win the group and claim the Seattle slot, "
+        f"but {FLAG_MAP.get(g2[0],'')} {g2[0]} ({g2[1]*100:.1f}%) and "
+        f"{FLAG_MAP.get(g3[0],'')} {g3[0]} ({g3[1]*100:.1f}%) are keeping the pressure on — "
+        f"a single result can shuffle the entire picture. "
+        f"On the 3rd-place side, the race to grab one of the eight global wild-card spots "
+        f"is shaping up with {FLAG_MAP.get(top_3rd[0][0],'')} **{top_3rd[0][0]}** ({top_3rd[0][1]*100:.1f}%), "
+        f"{FLAG_MAP.get(top_3rd[1][0],'')} {top_3rd[1][0]} ({top_3rd[1][1]*100:.1f}%), and "
+        f"{FLAG_MAP.get(top_3rd[2][0],'')} {top_3rd[2][0]} ({top_3rd[2][1]*100:.1f}%) leading "
+        f"the eligible groups. The single most probable exact matchup at Lumen Field is "
+        f"{FLAG_MAP.get(top_pair[0],'')} **{top_pair[0]} vs {FLAG_MAP.get(top_pair[1],'')} {top_pair[1]}** "
+        f"at **{top_pair_p*100:.2f}%** — still a long way from a lock. "
+        f"The Chaos Index sits at **{chaos}%** ({chaos_class.replace('_',' ').title()}), "
+        f"meaning the Seattle matchup remains genuinely wide open through the end of the group stage."
+    )
+    return para
+
+
+def save_email_signup(email: str) -> bool:
+    """
+    Persist a subscriber email to a local CSV file in the workspace.
+
+    In production, swap this for:
+      - A Supabase/PostgreSQL insert, OR
+      - A direct call to your ESP (Resend / SendGrid / Loops) list API, OR
+      - A Google Sheet append via the Sheets API
+
+    The CSV approach works perfectly on Streamlit Community Cloud as long as
+    you don't need the list to survive redeployments (use a database for that).
+    """
+    import csv, os, re
+
+    # Basic email validation
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email.strip()):
+        return False
+
+    filepath = "/tmp/match82_subscribers.csv"
+    existing = set()
+    if os.path.exists(filepath):
+        with open(filepath, newline="") as f:
+            existing = {row[0].strip().lower() for row in csv.reader(f) if row}
+
+    if email.strip().lower() in existing:
+        return True  # already subscribed, treat as success
+
+    with open(filepath, "a", newline="") as f:
+        csv.writer(f).writerow([email.strip().lower(),
+                                 __import__("datetime").date.today().isoformat()])
+    return True
+
+
+def count_subscribers() -> int:
+    import csv, os
+    filepath = "/tmp/match82_subscribers.csv"
+    if not os.path.exists(filepath):
+        return 0
+    with open(filepath, newline="") as f:
+        return sum(1 for row in csv.reader(f) if row)
+
+
+def render_digest_section(mc: dict) -> None:
+    """
+    Renders the daily digest signup section and a live preview of today's paragraph.
+    """
+    st.markdown("## 📧 Daily Odds Brief")
+    st.markdown(
+        '<p style="color:#64748b;font-size:0.85rem;margin-top:-0.4rem;">'
+        'Get a one-paragraph daily summary of how Match 82 odds shifted overnight, '
+        'driven by yesterday&#39;s results. Plain English. No noise.'
+        '</p>',
+        unsafe_allow_html=True,
+    )
+
+    col_form, col_preview = st.columns([1, 1.6], gap="large")
+
+    with col_form:
+        st.markdown(
+            '<div style="background:#0e1628;border:1px solid #1e3a5f;border-radius:10px;'
+            'padding:1.4rem 1.6rem;">'
+            '<p style="color:#cbd5e1;font-size:0.92rem;font-weight:600;margin:0 0 0.3rem;">'
+            '📬 Subscribe</p>'
+            '<p style="color:#475569;font-size:0.8rem;margin:0 0 1rem;">'
+            'Delivered each morning during the group stage — June 14 through June 26.</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.form("digest_signup", clear_on_submit=True):
+            email_input = st.text_input(
+                "Your email",
+                placeholder="you@example.com",
+                label_visibility="collapsed",
+            )
+            submit = st.form_submit_button(
+                "Subscribe to Daily Brief",
+                use_container_width=True,
+            )
+
+        if submit:
+            if email_input and "@" in email_input:
+                ok = save_email_signup(email_input)
+                if ok:
+                    st.success(
+                        f"Subscribed! You'll receive the first digest tomorrow morning. "
+                        f"({count_subscribers()} subscriber{'s' if count_subscribers()!=1 else ''})"
+                    )
+                else:
+                    st.error("That doesn't look like a valid email address.")
+            else:
+                st.warning("Please enter a valid email address.")
+
+        # Explainer
+        st.markdown(
+            '<div style="margin-top:1rem;padding:0.9rem 1.1rem;background:#080f1c;'
+            'border:1px solid #1e2a44;border-radius:8px;">'
+            '<p style="color:#475569;font-size:0.76rem;margin:0 0 0.5rem;text-transform:uppercase;'
+            'letter-spacing:0.07em;font-weight:700;">What you&#39;ll get</p>'
+            '<ul style="color:#64748b;font-size:0.8rem;margin:0;padding-left:1.1rem;line-height:1.8;">'
+            '<li>How overnight results shifted Match 82 win probabilities</li>'
+            '<li>Which 3rd-place team climbed or fell in the global race</li>'
+            '<li>The single biggest probability swing of the past 24 hours</li>'
+            '<li>Current Chaos Index reading + what it means for Seattle</li>'
+            '</ul>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Send instructions for production wiring
+        with st.expander("🔧 Production wiring guide"):
+            st.markdown(
+                """
+                **To send real emails**, wire these three components:
+
+                **1. Scheduler** — GitHub Actions cron (free) or a cloud function:
+                ```yaml
+                # .github/workflows/daily_digest.yml
+                on:
+                  schedule:
+                    - cron: '0 14 * * *'  # 7 AM PT during group stage
+                jobs:
+                  digest:
+                    runs-on: ubuntu-latest
+                    steps:
+                      - run: python send_digest.py
+                ```
+
+                **2. LLM writer** — `send_digest.py` calls `gpt-4o-mini`:
+                ```python
+                import openai, json
+                from app import run_monte_carlo, generate_digest_paragraph
+
+                mc = run_monte_carlo(n_sims=50_000)
+                context = generate_digest_paragraph(mc)  # structured context
+
+                response = openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                      {"role": "system", "content": 
+                        "You are a sharp soccer analyst writing a 2-sentence daily "
+                        "odds brief. Be specific about numbers. Sound like The Athletic, "
+                        "not ESPN. No hype."},
+                      {"role": "user", "content": context}
+                    ]
+                )
+                paragraph = response.choices[0].message.content
+                ```
+
+                **3. Email sender** — [Resend](https://resend.com) (free up to 3k/mo):
+                ```python
+                import resend
+                resend.api_key = os.environ["RESEND_API_KEY"]
+
+                for email in get_subscribers():  # read from DB / CSV
+                    resend.Emails.send({
+                      "from": "match82@yourdomain.com",
+                      "to": email,
+                      "subject": f"Match 82 Brief — {today}",
+                      "text": paragraph,
+                    })
+                ```
+
+                Total cost: **$0** for the scheduler + **~$0.001/digest** for the LLM
+                (at gpt-4o-mini pricing) + **$0** for email under 3k subscribers.
+                """
+            )
+
+    with col_preview:
+        st.markdown(
+            '<p style="color:#475569;font-size:0.72rem;text-transform:uppercase;'
+            'letter-spacing:0.08em;font-weight:700;margin-bottom:0.6rem;">'
+            'Today&#39;s digest preview</p>',
+            unsafe_allow_html=True,
+        )
+        digest_text = generate_digest_paragraph(mc)
+        st.markdown(
+            f'<div style="background:#080f1c;border:1px solid #1e3a5f;border-radius:10px;'
+            f'padding:1.4rem 1.6rem;line-height:1.85;font-size:0.88rem;color:#cbd5e1;">'
+            f'{digest_text}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "In production this paragraph is written by gpt-4o-mini using live probability "
+            "deltas as context. Today's preview is template-generated from current MC output."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1137,11 +1394,16 @@ def main() -> None:
     # ── HEADER ─────────────────────────────────────────────────────────────────
     col_hdr, col_badge = st.columns([3, 1])
     with col_hdr:
-        st.markdown("# ⚽ Match 82 — Seattle Lumen Field")
         st.markdown(
-            '<p style="color:#475569;font-size:0.85rem;margin-top:-0.5rem;">'
-            'Round of 32 · <b style="color:#64748b">Group G Winner vs. 3rd Place A/E/H/I/J</b> · '
-            'Wed July 1, 2026 · 1:00 PM PT'
+            '<h1 style="font-size:1.75rem;font-weight:800;color:#f8fafc;letter-spacing:-0.02em;'
+            'margin-bottom:0.3rem;">⚽ Match 82 — Seattle Lumen Field</h1>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p style="color:#94a3b8;font-size:0.85rem;margin-top:0;font-weight:400;">'
+            'Round of 32 &nbsp;·&nbsp; '
+            '<span style="color:#cbd5e1;font-weight:600;">Group G Winner vs. 3rd Place A/E/H/I/J</span>'
+            ' &nbsp;·&nbsp; Wed July 1, 2026 &nbsp;·&nbsp; 1:00 PM PT'
             '</p>', unsafe_allow_html=True,
         )
     with col_badge:
@@ -1162,12 +1424,17 @@ def main() -> None:
     # ── TOP METRICS ─────────────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("G Winner Favourite", f"{FLAG_MAP.get(g_leader,'🏳️')} {g_leader}", f"{g_leader_p*100:.1f}%")
+        st.metric("Group G Favourite", f"{FLAG_MAP.get(g_leader,'🏳️')} {g_leader}", f"{g_leader_p*100:.1f}% win prob")
     with c2:
-        st.metric("Top 3rd-Place Candidate", f"{FLAG_MAP.get(best_3rd,'🏳️')} {best_3rd}", f"{best_3rd_p*100:.1f}%")
+        st.metric("Top 3rd-Place Candidate", f"{FLAG_MAP.get(best_3rd,'🏳️')} {best_3rd}", f"{best_3rd_p*100:.1f}% advance prob")
     with c3:
         top_pair = max(mc["match82_joint_prob"], key=mc["match82_joint_prob"].get) if mc["match82_joint_prob"] else ("?","?")
-        st.metric("Most Likely Exact Matchup", f"{top_pair[0]} vs {top_pair[1]}", f"{top_joint*100:.2f}%")
+        # Render matchup as two lines to avoid truncation
+        st.metric(
+            "Most Likely Matchup",
+            f"{FLAG_MAP.get(top_pair[0],'🏳️')} {top_pair[0]}",
+            f"vs {FLAG_MAP.get(top_pair[1],'🏳️')} {top_pair[1]} · {top_joint*100:.2f}%",
+        )
     with c4:
         st.metric("Chaos Index", f"{chaos_val}%", c_label)
     
@@ -1183,12 +1450,17 @@ def main() -> None:
     v_border = "#166534" if verdict=="YES" else ("#7f1d1d" if verdict=="NO" else "#92400e")
     
     st.markdown(
-        f'<div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.8rem;">'
-        f'<span style="font-size:1.3rem;font-weight:800;color:#f1f5f9;">'
+        f'<div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap;">'
+        f'<span style="font-size:1.55rem;font-weight:800;color:#f8fafc;letter-spacing:-0.01em;">'
         f'{FLAG_MAP.get(selected_team,"🏳️")} {selected_team}</span>'
         f'<span style="background:{v_bg};border:1px solid {v_border};border-radius:6px;'
-        f'padding:3px 12px;font-size:0.78rem;font-weight:800;color:{v_color};">{verdict}</span>'
-        f'<span style="color:#475569;font-size:0.82rem;">Elo: {ELO.get(selected_team,"N/A")} · Group {recipe["group"]}</span>'
+        f'padding:4px 14px;font-size:0.82rem;font-weight:800;color:{v_color};'
+        f'letter-spacing:0.06em;">{verdict}</span>'
+        f'<span style="color:#64748b;font-size:0.82rem;border-left:1px solid #1e2235;'
+        f'padding-left:1rem;">'
+        f'Elo <span style="color:#94a3b8;font-weight:600;">{ELO.get(selected_team,"N/A")}</span>'
+        f' &nbsp;·&nbsp; Group <span style="color:#94a3b8;font-weight:600;">{recipe["group"]}</span>'
+        f'</span>'
         f'</div>', unsafe_allow_html=True,
     )
     
@@ -1311,6 +1583,10 @@ def main() -> None:
             st.dataframe(df, use_container_width=True, hide_index=False,
                 column_config={"Advance Prob %": st.column_config.ProgressColumn("Advance Prob %", min_value=0, max_value=100, format="%.1f%%")})
     
+    # ── DAILY DIGEST SIGNUP ────────────────────────────────────────────────────
+    st.markdown("---")
+    render_digest_section(mc)
+
     # ── FOOTER ──────────────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown(
