@@ -1310,9 +1310,8 @@ def render_matchup_chart_html(mc: dict, top_n: int = 12) -> str:
     for (team_a, team_b), prob in sorted_pairs:
         pct = prob * 100
         bar_width = int((prob / max_prob) * 100) if max_prob > 0 else 0
-        flag_a = FLAG_MAP.get(team_a, "🏳️")
-        flag_b = FLAG_MAP.get(team_b, "🏳️")
-        label = f"{flag_a} {team_a} vs {flag_b} {team_b}"
+        # No emoji flags — Gmail blocks rendering of tables containing emoji
+        label = f"{team_a} vs {team_b}"
         rows.append(
             f'<tr>'
             f'<td style="padding:5px 10px 5px 0;color:#94a3b8;font-size:0.78rem;'
@@ -1371,8 +1370,18 @@ def generate_digest_email_html(mc: dict, paragraph: str) -> str:
     # Pure HTML/CSS bar chart — no kaleido, works in Gmail/Outlook/Apple Mail
     chart_html = render_matchup_chart_html(mc, top_n=12)
 
+    # Strip emoji from paragraph (Gmail can misrender them inside dark-bg tables)
+    import unicodedata
+    def strip_emoji(text):
+        return "".join(
+            c for c in text
+            if not (0x1F300 <= ord(c) <= 0x1FAFF or  # misc symbols/emoji
+                    0x2600 <= ord(c) <= 0x27BF or     # misc symbols
+                    0x1F1E0 <= ord(c) <= 0x1F1FF)     # flag sequences
+        ).strip()
+    paragraph_clean = strip_emoji(paragraph)
     # Convert markdown bold to <strong>, split paragraphs
-    paragraph_html = re.sub(r"\*\*(.+?)\*\*", r"<strong style='color:#f8fafc;'>\1</strong>", paragraph)
+    paragraph_html = re.sub(r"\*\*(.+?)\*\*", r"<strong style='color:#f8fafc;'>\1</strong>", paragraph_clean)
     paragraph_html = "</p><p style='margin:0 0 12px 0;color:#cbd5e1;font-size:15px;line-height:1.8;font-family:Arial,sans-serif;'>".join(
         paragraph_html.split("\n\n")
     )
