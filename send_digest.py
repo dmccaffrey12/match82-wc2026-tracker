@@ -192,7 +192,7 @@ def build_chart_png(mc: dict) -> bytes | None:
             bar.set_linewidth(0.5)
 
         ax.set_yticks(y_pos)
-        ax.set_yticklabels(labels[::-1], color=TEXT, fontsize=9)
+        ax.set_yticklabels(labels[::-1], color="#f8fafc", fontsize=9)
         ax.set_xlabel("Probability (%)", color=SUBTEXT, fontsize=9, labelpad=8)
         ax.set_title("Most Probable Exact Matchups — Match 82",
                      color="#f8fafc", fontsize=12, fontweight="bold", pad=14)
