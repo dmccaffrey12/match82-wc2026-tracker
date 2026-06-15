@@ -200,13 +200,16 @@ def build_chart_png(mc: dict) -> bytes | None:
         SUBTEXT = "#475569"
         GRID    = "#1e3a5f"
 
-        # Use a font that supports emoji on Linux runners
+        # Load Noto Color Emoji font (installed via apt in the workflow)
         from matplotlib import font_manager
-        emoji_font = None
-        for fname in font_manager.findSystemFonts():
-            if any(x in fname.lower() for x in ["noto", "seguiemj", "apple color"]):
-                emoji_font = fname
-                break
+        font_manager._load_fontmanager(try_read_cache=False)  # refresh after apt install
+        noto_candidates = [
+            f for f in font_manager.findSystemFonts()
+            if "noto" in f.lower() and "emoji" in f.lower()
+        ]
+        if noto_candidates:
+            font_manager.fontManager.addfont(noto_candidates[0])
+            plt.rcParams["font.family"] = "Noto Color Emoji"
 
         fig, ax = plt.subplots(figsize=(10, 6.5))
         fig.patch.set_facecolor(BG)
