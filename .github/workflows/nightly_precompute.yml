@@ -41,6 +41,8 @@ jobs:
 
       - name: Run Monte Carlo pre-computation
         run: python precompute.py --sims 50000
+        env:
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
 
       - name: Commit results.json
         run: |

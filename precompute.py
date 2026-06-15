@@ -52,6 +52,7 @@ _st_stub.sidebar         = types.SimpleNamespace(
     expander=lambda *a, **kw: types.SimpleNamespace(__enter__=lambda s: s, __exit__=lambda *a: None),
 )
 _st_stub.session_state   = {}
+_st_stub.secrets         = {}  # Prevent AttributeError; API keys come from os.environ in Actions
 _st_stub.spinner         = lambda *a, **kw: types.SimpleNamespace(__enter__=lambda s: s, __exit__=lambda *a: None)
 sys.modules["streamlit"] = _st_stub
 

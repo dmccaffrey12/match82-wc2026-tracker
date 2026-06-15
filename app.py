@@ -184,7 +184,66 @@ ELO: dict[str, float] = {
 # CURRENT LIVE STANDINGS  (update as matches complete)
 # Format: {team: {"mp":int, "w":int, "d":int, "l":int, "gf":int, "ga":int}}
 # The simulator picks up from here and only plays REMAINING fixtures.
+#
+# LIVE UPDATE: Set FOOTBALL_DATA_API_KEY in .streamlit/secrets.toml or as an
+# environment variable to auto-fetch live standings from football-data.org.
+# Free tier: 10 req/min — register at https://www.football-data.org/client/register
+# If the key is absent the app falls back to the hardcoded LIVE_STANDINGS dict.
 # ─────────────────────────────────────────────────────────────────────────────
+
+FOOTBALL_DATA_API_KEY: str = (
+    os.environ.get("FOOTBALL_DATA_API_KEY", "")
+    or (st.secrets.get("FOOTBALL_DATA_API_KEY", "") if hasattr(st, "secrets") else "")
+)
+
+
+@st.cache_data(ttl=300)  # Re-fetch every 5 minutes
+def fetch_standings_from_api() -> dict[str, dict] | None:
+    """
+    Fetch live group standings from football-data.org v4 API.
+
+    Returns a dict of {team_name: {mp, w, d, l, gf, ga}} on success,
+    or None if no API key is configured or the fetch fails (falls back
+    to the hardcoded LIVE_STANDINGS dict).
+
+    Setup (one-time):
+      1. Register free at https://www.football-data.org/client/register
+      2. Add to .streamlit/secrets.toml:  FOOTBALL_DATA_API_KEY = "your_key"
+         OR add as a GitHub Actions secret and Streamlit Cloud secret.
+
+    API endpoint: GET https://api.football-data.org/v4/competitions/WC/standings
+    Auth header:  X-Auth-Token: {key}
+    Free tier:    10 req/min — plenty for once-daily precompute.
+    """
+    if not FOOTBALL_DATA_API_KEY:
+        return None
+    import urllib.request
+    url = "https://api.football-data.org/v4/competitions/WC/standings"
+    req = urllib.request.Request(url, headers={"X-Auth-Token": FOOTBALL_DATA_API_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        st.warning(f"⚠️ football-data.org fetch failed: {e}")
+        return None
+    standings: dict[str, dict] = {}
+    for group_block in data.get("standings", []):
+        for row in group_block.get("table", []):
+            name = row.get("team", {}).get("name", "").strip()
+            if not name:
+                continue
+            standings[name] = {
+                "mp": int(row.get("playedGames", 0)),
+                "w":  int(row.get("won",         0)),
+                "d":  int(row.get("draw",        0)),
+                "l":  int(row.get("lost",        0)),
+                "gf": int(row.get("goalsFor",    0)),
+                "ga": int(row.get("goalsAgainst",0)),
+            }
+    return standings if standings else None
+
+
+# ── Hardcoded fallback standings (updated manually if no Sheet is configured) ─
 LIVE_STANDINGS: dict[str, dict] = {
     # Group A — 1 match played each (Mexico 2-0 South Africa; South Korea 2-1 Czechia)
     "Mexico":       {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":0},
@@ -512,14 +571,16 @@ def simulate_match(team_a: str, team_b: str) -> tuple[int, int]:
 
 def init_group_tables() -> dict[str, dict[str, list]]:
     """
-    Initialize standings from LIVE_STANDINGS.
-    Returns: {team: [pts, gf, ga, gd, w, d, l]}
+    Initialize standings from live API data (football-data.org) when available,
+    falling back to the hardcoded LIVE_STANDINGS dict if no API key is set.
+    Returns: {group: {team: [pts, gf, ga, gd, w, d, l]}}
     """
+    live = fetch_standings_from_api() or LIVE_STANDINGS
     tables: dict[str, dict[str, list]] = {}
     for grp, teams in GROUPS.items():
         tables[grp] = {}
         for t in teams:
-            s = LIVE_STANDINGS.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
+            s = live.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
             pts = s["w"] * 3 + s["d"]
             tables[grp][t] = [pts, s["gf"], s["ga"], s["gf"]-s["ga"], s["w"], s["d"], s["l"]]
     return tables
@@ -1643,10 +1704,10 @@ def render_digest_section(mc: dict) -> None:
                 print(f"Sent to {{len(subscribers)}} subscribers.")
                 ```
 
-                **Chart snapshot timing**: The cron runs at 7 AM PT, after you've updated
-                `LIVE_STANDINGS` in app.py with the previous day's final scores and pushed
-                to GitHub. The chart will reflect that morning's MC output — exactly what
-                changed overnight.
+                **Chart snapshot timing**: The cron runs at 7 AM PT. With `FOOTBALL_DATA_API_KEY`
+                configured, standings are fetched automatically from football-data.org — no
+                manual code edits needed. The chart reflects that morning's MC output based
+                on the previous day's final scores.
 
                 Total cost: **$0** for scheduler + **~$0.001/digest** (gpt-4o-mini) +
                 **$0** for email under 3k subscribers (Resend free tier).
@@ -1890,9 +1951,10 @@ def main() -> None:
     st.markdown("## 📋 Current Standings")
     
     with st.expander("Group G", expanded=True):
+        _live = fetch_standings_from_api() or LIVE_STANDINGS
         rows = []
         for t in GROUPS["G"]:
-            s = LIVE_STANDINGS[t]
+            s = _live.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
             pts = s["w"]*3 + s["d"]
             rows.append({
                 "": FLAG_MAP.get(t,"🏳️"), "Team": t,
@@ -1908,9 +1970,10 @@ def main() -> None:
     tabs = st.tabs([f"Group {g}" for g in THIRD_PLACE_GROUPS])
     for tab, grp in zip(tabs, THIRD_PLACE_GROUPS):
         with tab:
+            _live = fetch_standings_from_api() or LIVE_STANDINGS
             rows = []
             for t in GROUPS[grp]:
-                s = LIVE_STANDINGS.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
+                s = _live.get(t, {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0})
                 pts = s["w"]*3 + s["d"]
                 rows.append({
                     "": FLAG_MAP.get(t,"🏳️"), "Team": t,
