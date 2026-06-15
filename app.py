@@ -1306,7 +1306,8 @@ def render_chart_to_b64(mc: dict) -> str:
         img_bytes = fig.to_image(format="png", width=900, height=500, scale=2)
         import base64
         return base64.b64encode(img_bytes).decode("utf-8")
-    except Exception:
+    except Exception as e:
+        print(f"[render_chart_to_b64] Chart render failed: {e}")
         return ""
 
 
