@@ -162,35 +162,7 @@ def build_chart_png(mc: dict) -> bytes | None:
 
         sorted_pairs = sorted(joint.items(), key=lambda x: x[1], reverse=True)[:12]
 
-        # Flag map — emoji work fine in matplotlib PNG attachments
-        flags = {
-            "Belgium": "🇧🇪", "Egypt": "🇪🇬", "Iran": "🇮🇷", "New Zealand": "🇳🇿",
-            "Spain": "🇪🇸", "France": "🇫🇷", "Argentina": "🇦🇷", "Germany": "🇩🇪",
-            "Brazil": "🇧🇷", "Portugal": "🇵🇹", "England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Netherlands": "🇳🇱",
-            "USA": "🇺🇸", "Mexico": "🇲🇽", "Uruguay": "🇺🇾", "Ecuador": "🇪🇨",
-            "Colombia": "🇨🇴", "Chile": "🇨🇱", "Peru": "🇵🇪", "Paraguay": "🇵🇾",
-            "Venezuela": "🇻🇪", "Bolivia": "🇧🇴", "Canada": "🇨🇦", "Costa Rica": "🇨🇷",
-            "Panama": "🇵🇦", "Jamaica": "🇯🇲", "Honduras": "🇭🇳", "El Salvador": "🇸🇻",
-            "Morocco": "🇲🇦", "Senegal": "🇸🇳", "Nigeria": "🇳🇬", "Ghana": "🇬🇭",
-            "Cameroon": "🇨🇲", "Ivory Coast": "🇨🇮", "Cote d'Ivoire": "🇨🇮",
-            "Côte d'Ivoire": "🇨🇮", "Algeria": "🇩🇿", "Tunisia": "🇹🇳",
-            "South Africa": "🇿🇦", "Mali": "🇲🇱", "Cabo Verde": "🇨🇻",
-            "Saudi Arabia": "🇸🇦", "Japan": "🇯🇵", "South Korea": "🇰🇷",
-            "Australia": "🇦🇺", "Iran": "🇮🇷", "Qatar": "🇶🇦", "Iraq": "🇮🇶",
-            "Jordan": "🇯🇴", "Uzbekistan": "🇺🇿", "Indonesia": "🇮🇩",
-            "Czechia": "🇨🇿", "Austria": "🇦🇹", "Switzerland": "🇨🇭",
-            "Croatia": "🇭🇷", "Serbia": "🇷🇸", "Denmark": "🇩🇰", "Norway": "🇳🇴",
-            "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Turkey": "🇹🇷", "Ukraine": "🇺🇦",
-            "Romania": "🇷🇴", "Hungary": "🇭🇺", "Slovakia": "🇸🇰",
-            "Slovenia": "🇸🇮", "Albania": "🇦🇱", "Greece": "🇬🇷",
-            "Poland": "🇵🇱", "Russia": "🇷🇺",
-        }
-
-        def flabel(team):
-            f = flags.get(team, "")
-            return f"{f} {team}" if f else team
-
-        labels = [f"{flabel(a)} vs {flabel(b)}" for (a, b), _ in sorted_pairs]
+        labels = [f"{a} vs {b}" for (a, b), _ in sorted_pairs]
         values = [v * 100 for _, v in sorted_pairs]
 
         # Dark theme colors
@@ -200,16 +172,9 @@ def build_chart_png(mc: dict) -> bytes | None:
         SUBTEXT = "#475569"
         GRID    = "#1e3a5f"
 
-        # Load Noto Color Emoji font (installed via apt in the workflow)
-        from matplotlib import font_manager
-        font_manager._load_fontmanager(try_read_cache=False)  # refresh after apt install
-        noto_candidates = [
-            f for f in font_manager.findSystemFonts()
-            if "noto" in f.lower() and "emoji" in f.lower()
-        ]
-        if noto_candidates:
-            font_manager.fontManager.addfont(noto_candidates[0])
-            plt.rcParams["font.family"] = "Noto Color Emoji"
+        # Emoji flags can't render in matplotlib PNG (bitmap font limitation)
+        # Use clean team names only — chart still looks sharp
+        plt.rcParams["font.family"] = "DejaVu Sans"
 
         fig, ax = plt.subplots(figsize=(10, 6.5))
         fig.patch.set_facecolor(BG)
