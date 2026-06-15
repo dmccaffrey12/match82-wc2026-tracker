@@ -1366,115 +1366,97 @@ def generate_digest_email_html(mc: dict, paragraph: str) -> str:
     """
     import datetime, re
     today = datetime.date.today().strftime("%B %d, %Y")
+    n_sims = mc.get("n_sims", 50000)
 
-    # Pure HTML/CSS bar chart — no kaleido, works in Gmail/Outlook/Apple Mail
-    chart_html = render_matchup_chart_html(mc, top_n=12)
-
-    # Strip emoji from paragraph (Gmail can misrender them inside dark-bg tables)
-    import unicodedata
-    def strip_emoji(text):
+    # Strip emoji and markdown bold from paragraph — keep it clean plain text
+    def strip_emoji(text: str) -> str:
         return "".join(
             c for c in text
-            if not (0x1F300 <= ord(c) <= 0x1FAFF or  # misc symbols/emoji
-                    0x2600 <= ord(c) <= 0x27BF or     # misc symbols
-                    0x1F1E0 <= ord(c) <= 0x1F1FF)     # flag sequences
+            if not (0x1F300 <= ord(c) <= 0x1FAFF or
+                    0x2600 <= ord(c) <= 0x27BF or
+                    0x1F1E0 <= ord(c) <= 0x1F1FF)
         ).strip()
-    paragraph_clean = strip_emoji(paragraph)
-    # Convert markdown bold to <strong>, split paragraphs
-    paragraph_html = re.sub(r"\*\*(.+?)\*\*", r"<strong style='color:#f8fafc;'>\1</strong>", paragraph_clean)
-    paragraph_html = "</p><p style='margin:0 0 12px 0;color:#cbd5e1;font-size:15px;line-height:1.8;font-family:Arial,sans-serif;'>".join(
-        paragraph_html.split("\n\n")
+
+    clean = strip_emoji(paragraph)
+    # Strip leading title line if present (e.g. "Match 82 Daily Brief — June X, 2026")
+    lines = clean.strip().splitlines()
+    if lines and ("Daily Brief" in lines[0] or "Match 82" in lines[0]):
+        clean = "\n".join(lines[1:]).strip()
+    # Convert **bold** to <strong>
+    clean_html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", clean)
+    # Split on double newlines into paragraphs
+    paras = [p.strip() for p in re.split(r"\n{2,}", clean_html) if p.strip()]
+    paragraph_html = "".join(
+        f'<p style="margin:0 0 14px 0;color:#1a1a2e;font-size:15px;'
+        f'line-height:1.8;font-family:Arial,Helvetica,sans-serif;">{p}</p>'
+        for p in paras
     )
 
-    n_sims = mc.get('n_sims', 50000)
-
+    # Light-mode email — Gmail-safe, no dark backgrounds
+    # Chart is sent as attachment, not embedded
     return f"""<!DOCTYPE html>
-<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Match 82 Brief</title>
-  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
 </head>
-<body style="margin:0;padding:0;" bgcolor="#080f1c">
+<body style="margin:0;padding:0;background:#f4f6f9;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;">
+<tr><td align="center" style="padding:28px 12px;">
 
-<!-- Outer wrapper -->
-<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#080f1c">
-<tr><td align="center" style="padding:32px 12px;" bgcolor="#080f1c">
+  <table width="580" cellpadding="0" cellspacing="0"
+         style="max-width:580px;width:100%;background:#ffffff;
+                border-radius:8px;border:1px solid #dde3ec;">
 
-<!-- Card -->
-<table width="600" cellpadding="0" cellspacing="0" border="0"
-       style="max-width:600px;width:100%;">
+    <!-- Header band -->
+    <tr>
+      <td style="background:#0d1b38;padding:20px 28px;border-radius:8px 8px 0 0;">
+        <p style="margin:0;color:#7aa8cc;font-size:11px;font-family:Arial,sans-serif;
+                  text-transform:uppercase;letter-spacing:2px;font-weight:700;">
+          MATCH 82 &middot; LUMEN FIELD &middot; JULY 1, 2026
+        </p>
+        <p style="margin:6px 0 2px;color:#ffffff;font-size:20px;font-weight:700;
+                  font-family:Arial,sans-serif;">Daily Odds Brief</p>
+        <p style="margin:0;color:#7aa8cc;font-size:13px;font-family:Arial,sans-serif;">{today}</p>
+      </td>
+    </tr>
 
-  <!-- Header -->
-  <tr>
-    <td bgcolor="#0d1b38" style="padding:24px 28px;border-radius:12px 12px 0 0;
-        border:1px solid #1e3a5f;border-bottom:none;">
-      <p style="margin:0;color:#4a7fa5;font-size:11px;text-transform:uppercase;
-                letter-spacing:2px;font-weight:700;font-family:Arial,sans-serif;">
-        MATCH 82 &nbsp;&middot;&nbsp; LUMEN FIELD &nbsp;&middot;&nbsp; JULY 1, 2026
-      </p>
-      <p style="margin:8px 0 4px;color:#f8fafc;font-size:22px;font-weight:700;
-                font-family:Arial,sans-serif;line-height:1.2;">Daily Odds Brief</p>
-      <p style="margin:0;color:#4a7fa5;font-size:13px;font-family:Arial,sans-serif;">{today}</p>
-    </td>
-  </tr>
+    <!-- Body text -->
+    <tr>
+      <td style="padding:24px 28px 8px;">
+        {paragraph_html}
+      </td>
+    </tr>
 
-  <!-- Body -->
-  <tr>
-    <td bgcolor="#0e1628" style="padding:24px 28px 8px;
-        border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;">
-      <p style="margin:0 0 12px 0;color:#cbd5e1;font-size:15px;line-height:1.8;
-                font-family:Arial,sans-serif;">{paragraph_html}</p>
-    </td>
-  </tr>
+    <!-- Chart note -->
+    <tr>
+      <td style="padding:4px 28px 24px;">
+        <p style="margin:0;color:#64748b;font-size:12px;font-family:Arial,sans-serif;
+                  border-top:1px solid #e2e8f0;padding-top:14px;">
+          See attached <strong>match82_matchups.png</strong> for the
+          Most Probable Exact Matchups chart &mdash; based on a
+          {n_sims:,}-trial Dixon-Coles / Elo Monte Carlo simulation.
+        </p>
+      </td>
+    </tr>
 
-  <!-- Divider -->
-  <tr>
-    <td bgcolor="#0e1628" style="padding:0 28px;
-        border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr><td style="border-top:1px solid #1e3a5f;font-size:0;line-height:0;">&nbsp;</td></tr>
-      </table>
-    </td>
-  </tr>
+    <!-- Footer -->
+    <tr>
+      <td style="background:#f8fafc;padding:14px 28px;border-radius:0 0 8px 8px;
+                  border-top:1px solid #e2e8f0;">
+        <p style="margin:0;color:#94a3b8;font-size:11px;font-family:Arial,sans-serif;">
+          You signed up at the
+          <a href="https://match82-wc2026-tracker.streamlit.app"
+             style="color:#3b82f6;">Match 82 Tracker</a>. No spam, ever.
+        </p>
+      </td>
+    </tr>
 
-  <!-- Chart section -->
-  <tr>
-    <td bgcolor="#0e1628" style="padding:20px 28px 28px;
-        border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;">
-      <p style="margin:0 0 14px;color:#4a7fa5;font-size:11px;text-transform:uppercase;
-                letter-spacing:2px;font-weight:700;font-family:Arial,sans-serif;">
-        Most Probable Exact Matchups
-      </p>
-      {chart_html}
-      <p style="margin:12px 0 0;color:#334155;font-size:12px;font-family:Arial,sans-serif;">
-        Based on {n_sims:,}-trial Dixon-Coles / Elo Monte Carlo simulation.
-      </p>
-    </td>
-  </tr>
-
-  <!-- Footer -->
-  <tr>
-    <td bgcolor="#060c18" style="padding:16px 28px;border-radius:0 0 12px 12px;
-        border:1px solid #1e3a5f;border-top:1px solid #1e2a44;">
-      <p style="margin:0;color:#4a5568;font-size:12px;line-height:1.6;
-                font-family:Arial,sans-serif;">
-        You're receiving this because you signed up at the
-        <a href="https://match82-wc2026-tracker.streamlit.app"
-           style="color:#3b82f6;text-decoration:none;">Match 82 Tracker</a>.
-        No spam, ever.
-      </p>
-    </td>
-  </tr>
-
-</table>
-<!-- /Card -->
+  </table>
 
 </td></tr>
 </table>
-<!-- /Outer wrapper -->
-
 </body>
 </html>"""
 

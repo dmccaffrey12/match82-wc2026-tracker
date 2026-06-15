@@ -5,3 +5,4 @@ plotly>=5.20.0
 kaleido>=0.2.1
 openai>=1.30.0
 resend>=2.0.0
+matplotlib>=3.8.0

@@ -74,6 +74,7 @@ from app import (  # noqa: E402
     run_monte_carlo,
     generate_digest_paragraph,
     generate_digest_email_html,
+    build_matchup_distribution,
     compute_chaos_index,
 )
 
@@ -142,19 +143,100 @@ def write_llm_paragraph(context: str) -> str:
         return context
 
 
-def send_email(resend_client, to: str, subject: str, html: str, dry_run: bool = False) -> bool:
-    """Send one email via Resend. Returns True on success."""
+def build_chart_png(mc: dict) -> bytes | None:
+    """
+    Renders the top-12 most probable Match 82 matchups as a PNG using
+    matplotlib — no kaleido, no Chromium, works in any headless environment.
+    Returns PNG bytes or None on failure.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless backend, must be set before pyplot import
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        import io
+
+        joint = mc.get("match82_joint_prob", {})
+        if not joint:
+            return None
+
+        sorted_pairs = sorted(joint.items(), key=lambda x: x[1], reverse=True)[:12]
+        labels = [f"{a} vs {b}" for (a, b), _ in sorted_pairs]
+        values = [v * 100 for _, v in sorted_pairs]
+
+        # Dark theme colors
+        BG      = "#080f1c"
+        BAR     = "#3b82f6"
+        TEXT    = "#cbd5e1"
+        SUBTEXT = "#475569"
+        GRID    = "#1e3a5f"
+
+        fig, ax = plt.subplots(figsize=(9, 5.5))
+        fig.patch.set_facecolor(BG)
+        ax.set_facecolor(BG)
+
+        # Plot horizontal bars (reversed so highest is at top)
+        y_pos = range(len(labels))
+        bars = ax.barh(list(y_pos), values[::-1], color=BAR, height=0.6, zorder=3)
+
+        # Labels
+        ax.set_yticks(list(y_pos))
+        ax.set_yticklabels(labels[::-1], color=TEXT, fontsize=9, fontfamily="DejaVu Sans")
+        ax.set_xlabel("Probability (%)", color=SUBTEXT, fontsize=9)
+        ax.set_title("Most Probable Exact Matchups — Match 82",
+                     color="#f8fafc", fontsize=11, fontweight="bold", pad=12)
+
+        # Value labels on bars
+        for bar, val in zip(bars, values[::-1]):
+            ax.text(bar.get_width() + 0.05, bar.get_y() + bar.get_height() / 2,
+                    f"{val:.2f}%", va="center", color=TEXT, fontsize=8)
+
+        # Style
+        ax.tick_params(colors=SUBTEXT)
+        ax.xaxis.label.set_color(SUBTEXT)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GRID)
+        ax.grid(axis="x", color=GRID, linewidth=0.5, zorder=0)
+        ax.set_xlim(0, max(values) * 1.18)
+
+        n_sims = mc.get("n_sims", 50000)
+        fig.text(0.98, 0.01, f"{n_sims:,}-trial Dixon-Coles / Elo Monte Carlo",
+                 ha="right", color=SUBTEXT, fontsize=7)
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                    facecolor=BG, edgecolor="none")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        print(f"[build_chart_png] Failed: {e}")
+        return None
+
+
+def send_email(resend_client, to: str, subject: str, html: str,
+               attachment_png: bytes | None = None,
+               dry_run: bool = False) -> bool:
+    """Send one email via Resend with optional PNG attachment. Returns True on success."""
     if dry_run:
         print(f"[DRY RUN] Would send to: {to}")
         return True
     try:
-        resend_client.Emails.send({
+        import base64
+        payload = {
             "from":     FROM_ADDRESS,
             "reply_to": REPLY_TO,
             "to":       to,
             "subject":  subject,
             "html":     html,
-        })
+        }
+        if attachment_png:
+            payload["attachments"] = [{
+                "filename": "match82_matchups.png",
+                "content":  list(attachment_png),  # Resend expects list of ints
+            }]
+        resend_client.Emails.send(payload)
         return True
     except Exception as e:
         print(f"[send_digest] Failed to send to {to}: {e}")
@@ -201,8 +283,16 @@ def main():
 
     print(f"[send_digest] Paragraph ({len(paragraph)} chars):\n{paragraph}\n")
 
-    # ── 3. Build HTML email with chart ────────────────────────────────────────
-    print("[send_digest] Rendering chart and building HTML email...")
+    # ── 3. Build chart PNG attachment ────────────────────────────────────────
+    print("[send_digest] Rendering chart as PNG attachment...")
+    chart_png = build_chart_png(mc)
+    if chart_png:
+        print(f"[send_digest] Chart PNG ready ({len(chart_png):,} bytes)")
+    else:
+        print("[send_digest] Chart PNG failed — will send without attachment")
+
+    # ── 4. Build HTML email body (clean, Gmail-safe) ──────────────────────────
+    print("[send_digest] Building HTML email...")
     html_body = generate_digest_email_html(mc, paragraph)
 
     if args.dry_run:
@@ -212,7 +302,7 @@ def main():
         print(f"[DRY RUN] HTML written to {dry_run_path} — open in browser to preview.")
         return
 
-    # ── 4. Load subscribers ───────────────────────────────────────────────────
+    # ── 5. Load subscribers ───────────────────────────────────────────────────
     if args.to:
         subscribers = [args.to]
         print(f"[send_digest] Test mode — sending to {args.to} only")
@@ -224,7 +314,7 @@ def main():
         print("[send_digest] No subscribers — nothing to send. Exiting.")
         return
 
-    # ── 5. Send via Resend ────────────────────────────────────────────────────
+    # ── 6. Send via Resend ────────────────────────────────────────────────────
     resend_key = os.environ.get("RESEND_API_KEY")
     if not resend_key:
         print("[send_digest] ERROR: RESEND_API_KEY not set. Exiting.")
@@ -236,7 +326,8 @@ def main():
     sent = 0
     failed = 0
     for email in subscribers:
-        ok = send_email(resend, email, subject, html_body, dry_run=args.dry_run)
+        ok = send_email(resend, email, subject, html_body,
+                        attachment_png=chart_png, dry_run=args.dry_run)
         if ok:
             sent += 1
             print(f"[send_digest] ✓ {email}")
