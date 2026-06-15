@@ -161,7 +161,36 @@ def build_chart_png(mc: dict) -> bytes | None:
             return None
 
         sorted_pairs = sorted(joint.items(), key=lambda x: x[1], reverse=True)[:12]
-        labels = [f"{a} vs {b}" for (a, b), _ in sorted_pairs]
+
+        # Flag map — emoji work fine in matplotlib PNG attachments
+        flags = {
+            "Belgium": "🇧🇪", "Egypt": "🇪🇬", "Iran": "🇮🇷", "New Zealand": "🇳🇿",
+            "Spain": "🇪🇸", "France": "🇫🇷", "Argentina": "🇦🇷", "Germany": "🇩🇪",
+            "Brazil": "🇧🇷", "Portugal": "🇵🇹", "England": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "Netherlands": "🇳🇱",
+            "USA": "🇺🇸", "Mexico": "🇲🇽", "Uruguay": "🇺🇾", "Ecuador": "🇪🇨",
+            "Colombia": "🇨🇴", "Chile": "🇨🇱", "Peru": "🇵🇪", "Paraguay": "🇵🇾",
+            "Venezuela": "🇻🇪", "Bolivia": "🇧🇴", "Canada": "🇨🇦", "Costa Rica": "🇨🇷",
+            "Panama": "🇵🇦", "Jamaica": "🇯🇲", "Honduras": "🇭🇳", "El Salvador": "🇸🇻",
+            "Morocco": "🇲🇦", "Senegal": "🇸🇳", "Nigeria": "🇳🇬", "Ghana": "🇬🇭",
+            "Cameroon": "🇨🇲", "Ivory Coast": "🇨🇮", "Cote d'Ivoire": "🇨🇮",
+            "Côte d'Ivoire": "🇨🇮", "Algeria": "🇩🇿", "Tunisia": "🇹🇳",
+            "South Africa": "🇿🇦", "Mali": "🇲🇱", "Cabo Verde": "🇨🇻",
+            "Saudi Arabia": "🇸🇦", "Japan": "🇯🇵", "South Korea": "🇰🇷",
+            "Australia": "🇦🇺", "Iran": "🇮🇷", "Qatar": "🇶🇦", "Iraq": "🇮🇶",
+            "Jordan": "🇯🇴", "Uzbekistan": "🇺🇿", "Indonesia": "🇮🇩",
+            "Czechia": "🇨🇿", "Austria": "🇦🇹", "Switzerland": "🇨🇭",
+            "Croatia": "🇭🇷", "Serbia": "🇷🇸", "Denmark": "🇩🇰", "Norway": "🇳🇴",
+            "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "Turkey": "🇹🇷", "Ukraine": "🇺🇦",
+            "Romania": "🇷🇴", "Hungary": "🇭🇺", "Slovakia": "🇸🇰",
+            "Slovenia": "🇸🇮", "Albania": "🇦🇱", "Greece": "🇬🇷",
+            "Poland": "🇵🇱", "Russia": "🇷🇺",
+        }
+
+        def flabel(team):
+            f = flags.get(team, "")
+            return f"{f} {team}" if f else team
+
+        labels = [f"{flabel(a)} vs {flabel(b)}" for (a, b), _ in sorted_pairs]
         values = [v * 100 for _, v in sorted_pairs]
 
         # Dark theme colors
@@ -171,41 +200,60 @@ def build_chart_png(mc: dict) -> bytes | None:
         SUBTEXT = "#475569"
         GRID    = "#1e3a5f"
 
-        fig, ax = plt.subplots(figsize=(9, 5.5))
+        # Use a font that supports emoji on Linux runners
+        from matplotlib import font_manager
+        emoji_font = None
+        for fname in font_manager.findSystemFonts():
+            if any(x in fname.lower() for x in ["noto", "seguiemj", "apple color"]):
+                emoji_font = fname
+                break
+
+        fig, ax = plt.subplots(figsize=(10, 6.5))
         fig.patch.set_facecolor(BG)
         ax.set_facecolor(BG)
+        fig.subplots_adjust(left=0.38, right=0.88, top=0.90, bottom=0.08)
 
-        # Plot horizontal bars (reversed so highest is at top)
-        y_pos = range(len(labels))
-        bars = ax.barh(list(y_pos), values[::-1], color=BAR, height=0.6, zorder=3)
+        n = len(labels)
+        y_pos = list(range(n))
+        # Highest probability at top
+        bars = ax.barh(y_pos, values[::-1], color=BAR, height=0.55,
+                       zorder=3, alpha=0.92)
+        # Subtle bar edge
+        for bar in bars:
+            bar.set_edgecolor("#1d4ed8")
+            bar.set_linewidth(0.5)
 
-        # Labels
-        ax.set_yticks(list(y_pos))
-        ax.set_yticklabels(labels[::-1], color=TEXT, fontsize=9, fontfamily="DejaVu Sans")
-        ax.set_xlabel("Probability (%)", color=SUBTEXT, fontsize=9)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels[::-1], color=TEXT, fontsize=9)
+        ax.set_xlabel("Probability (%)", color=SUBTEXT, fontsize=9, labelpad=8)
         ax.set_title("Most Probable Exact Matchups — Match 82",
-                     color="#f8fafc", fontsize=11, fontweight="bold", pad=12)
+                     color="#f8fafc", fontsize=12, fontweight="bold", pad=14)
 
-        # Value labels on bars
+        # Value labels to the right of each bar
+        max_v = max(values)
         for bar, val in zip(bars, values[::-1]):
-            ax.text(bar.get_width() + 0.05, bar.get_y() + bar.get_height() / 2,
-                    f"{val:.2f}%", va="center", color=TEXT, fontsize=8)
+            ax.text(bar.get_width() + max_v * 0.015,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{val:.2f}%", va="center", color="#f8fafc",
+                    fontsize=8.5, fontweight="600")
 
-        # Style
-        ax.tick_params(colors=SUBTEXT)
-        ax.xaxis.label.set_color(SUBTEXT)
+        ax.tick_params(axis="both", colors=SUBTEXT, labelsize=9)
+        ax.tick_params(axis="y", length=0)  # no y-tick marks
         for spine in ax.spines.values():
-            spine.set_edgecolor(GRID)
-        ax.grid(axis="x", color=GRID, linewidth=0.5, zorder=0)
-        ax.set_xlim(0, max(values) * 1.18)
+            spine.set_visible(False)
+        ax.spines["bottom"].set_visible(True)
+        ax.spines["bottom"].set_edgecolor(GRID)
+        ax.grid(axis="x", color=GRID, linewidth=0.5, linestyle="--", zorder=0)
+        ax.set_xlim(0, max_v * 1.22)
+        ax.set_ylim(-0.6, n - 0.4)
 
         n_sims = mc.get("n_sims", 50000)
-        fig.text(0.98, 0.01, f"{n_sims:,}-trial Dixon-Coles / Elo Monte Carlo",
+        fig.text(0.99, 0.01,
+                 f"{n_sims:,}-trial Dixon-Coles / Elo Monte Carlo  ·  Match 82 · Lumen Field · July 1, 2026",
                  ha="right", color=SUBTEXT, fontsize=7)
 
-        plt.tight_layout()
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+        fig.savefig(buf, format="png", dpi=160, bbox_inches="tight",
                     facecolor=BG, edgecolor="none")
         plt.close(fig)
         buf.seek(0)
