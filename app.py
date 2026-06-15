@@ -1287,28 +1287,57 @@ def generate_digest_paragraph(mc: dict) -> str:
     return para
 
 
-def render_chart_to_b64(mc: dict) -> str:
+def render_matchup_chart_html(mc: dict, top_n: int = 12) -> str:
     """
-    Renders the 'Most Probable Exact Matchups' horizontal bar chart to a
-    base64-encoded PNG string suitable for inline embedding in an HTML email.
+    Renders the top-N most probable Match 82 matchups as a pure HTML/CSS
+    horizontal bar chart — no image rendering, no kaleido, works in every
+    email client including Gmail.
 
-    Requires the `kaleido` package (already in requirements.txt).
-    Returns an empty string if rendering fails (e.g. kaleido not installed).
+    Returns an HTML string safe to embed directly in the email body.
     """
-    try:
-        fig = build_matchup_distribution(mc, top_n=12)
-        # Force full dark background for the email snapshot
-        fig.update_layout(
-            paper_bgcolor="#080f1c",
-            plot_bgcolor="#080f1c",
-            margin=dict(l=180, r=40, t=60, b=40),
+    joint = mc.get("match82_joint_prob", {})
+    if not joint:
+        return '<p style="color:#64748b;font-size:0.8rem;">[No matchup data available]</p>'
+
+    # Sort and take top N
+    sorted_pairs = sorted(joint.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    if not sorted_pairs:
+        return ''
+
+    max_prob = sorted_pairs[0][1]
+
+    rows = []
+    for (team_a, team_b), prob in sorted_pairs:
+        pct = prob * 100
+        bar_width = int((prob / max_prob) * 100) if max_prob > 0 else 0
+        flag_a = FLAG_MAP.get(team_a, "🏳️")
+        flag_b = FLAG_MAP.get(team_b, "🏳️")
+        label = f"{flag_a} {team_a} vs {flag_b} {team_b}"
+        rows.append(
+            f'<tr>'
+            f'<td style="padding:5px 10px 5px 0;color:#94a3b8;font-size:0.78rem;'
+            f'white-space:nowrap;width:220px;font-family:Arial,sans-serif;">'
+            f'{label}</td>'
+            f'<td style="padding:5px 0;">'
+            f'<table cellpadding="0" cellspacing="0" width="100%">'
+            f'<tr>'
+            f'<td width="{bar_width}%" style="background:#3b82f6;height:14px;'
+            f'border-radius:3px;"></td>'
+            f'<td width="{100 - bar_width}%"></td>'
+            f'</tr></table>'
+            f'</td>'
+            f'<td style="padding:5px 0 5px 8px;color:#f8fafc;font-size:0.78rem;'
+            f'white-space:nowrap;font-family:Arial,sans-serif;font-weight:700;">'
+            f'{pct:.2f}%</td>'
+            f'</tr>'
         )
-        img_bytes = fig.to_image(format="png", width=900, height=500, scale=2)
-        import base64
-        return base64.b64encode(img_bytes).decode("utf-8")
-    except Exception as e:
-        print(f"[render_chart_to_b64] Chart render failed: {e}")
-        return ""
+
+    return (
+        '<table cellpadding="0" cellspacing="0" '
+        'style="width:100%;border-collapse:collapse;">'
+        + "".join(rows)
+        + "</table>"
+    )
 
 
 def generate_digest_email_html(mc: dict, paragraph: str) -> str:
@@ -1336,82 +1365,109 @@ def generate_digest_email_html(mc: dict, paragraph: str) -> str:
         "html":    html_body,
     })
     """
-    import datetime
+    import datetime, re
     today = datetime.date.today().strftime("%B %d, %Y")
-    b64 = render_chart_to_b64(mc)
 
-    chart_html = (
-        f'<img src="data:image/png;base64,{b64}" '
-        f'width="900" style="max-width:100%;border-radius:8px;margin-top:1.2rem;" '
-        f'alt="Most Probable Exact Matchups — Match 82" />'
-        if b64 else
-        '<p style="color:#64748b;font-size:0.8rem;">'
-        '[Chart unavailable — install kaleido: pip install kaleido]</p>'
+    # Pure HTML/CSS bar chart — no kaleido, works in Gmail/Outlook/Apple Mail
+    chart_html = render_matchup_chart_html(mc, top_n=12)
+
+    # Convert markdown bold to <strong>, split paragraphs
+    paragraph_html = re.sub(r"\*\*(.+?)\*\*", r"<strong style='color:#f8fafc;'>\1</strong>", paragraph)
+    paragraph_html = "</p><p style='margin:0 0 12px 0;color:#cbd5e1;font-size:15px;line-height:1.8;font-family:Arial,sans-serif;'>".join(
+        paragraph_html.split("\n\n")
     )
 
-    # Convert markdown bold (**text**) to <strong> for email clients
-    import re
-    paragraph_html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", paragraph)
-    paragraph_html = paragraph_html.replace("\n\n", "</p><p>")
+    n_sims = mc.get('n_sims', 50000)
 
-    return f"""
-<!DOCTYPE html>
-<html lang="en">
+    return f"""<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Match 82 Brief — {today}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Match 82 Brief</title>
+  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
 </head>
-<body style="margin:0;padding:0;background:#080f1c;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#080f1c;">
-    <tr><td align="center" style="padding:32px 16px;">
-      <table width="640" cellpadding="0" cellspacing="0"
-             style="max-width:640px;background:#0e1628;border-radius:12px;
-                    border:1px solid #1e3a5f;overflow:hidden;">
+<body style="margin:0;padding:0;" bgcolor="#080f1c">
 
-        <!-- Header -->
-        <tr><td style="background:#0d1b38;padding:24px 32px;
-                        border-bottom:1px solid #1e3a5f;">
-          <p style="margin:0;color:#475569;font-size:0.72rem;text-transform:uppercase;
-                    letter-spacing:0.1em;font-weight:700;">Match 82 · Lumen Field · July 1, 2026</p>
-          <h1 style="margin:6px 0 0;color:#f8fafc;font-size:1.35rem;font-weight:700;
-                     line-height:1.3;">Daily Odds Brief</h1>
-          <p style="margin:4px 0 0;color:#475569;font-size:0.82rem;">{today}</p>
-        </td></tr>
+<!-- Outer wrapper -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#080f1c">
+<tr><td align="center" style="padding:32px 12px;" bgcolor="#080f1c">
 
-        <!-- Body paragraph -->
-        <tr><td style="padding:28px 32px 8px;">
-          <p style="margin:0;color:#cbd5e1;font-size:0.95rem;line-height:1.85;">
-            {paragraph_html}
-          </p>
-        </td></tr>
+<!-- Card -->
+<table width="600" cellpadding="0" cellspacing="0" border="0"
+       style="max-width:600px;width:100%;">
 
-        <!-- Chart section -->
-        <tr><td style="padding:8px 32px 28px;">
-          <p style="margin:0 0 12px;color:#475569;font-size:0.72rem;text-transform:uppercase;
-                    letter-spacing:0.08em;font-weight:700;">Most Probable Exact Matchups</p>
-          {chart_html}
-          <p style="margin:10px 0 0;color:#334155;font-size:0.74rem;">
-            Probabilities from {mc.get('n_sims', 50000):,}-trial Dixon-Coles / Elo Monte Carlo simulation.
-          </p>
-        </td></tr>
+  <!-- Header -->
+  <tr>
+    <td bgcolor="#0d1b38" style="padding:24px 28px;border-radius:12px 12px 0 0;
+        border:1px solid #1e3a5f;border-bottom:none;">
+      <p style="margin:0;color:#4a7fa5;font-size:11px;text-transform:uppercase;
+                letter-spacing:2px;font-weight:700;font-family:Arial,sans-serif;">
+        MATCH 82 &nbsp;&middot;&nbsp; LUMEN FIELD &nbsp;&middot;&nbsp; JULY 1, 2026
+      </p>
+      <p style="margin:8px 0 4px;color:#f8fafc;font-size:22px;font-weight:700;
+                font-family:Arial,sans-serif;line-height:1.2;">Daily Odds Brief</p>
+      <p style="margin:0;color:#4a7fa5;font-size:13px;font-family:Arial,sans-serif;">{today}</p>
+    </td>
+  </tr>
 
-        <!-- Footer -->
-        <tr><td style="background:#060c18;border-top:1px solid #1e2a44;
-                        padding:16px 32px;">
-          <p style="margin:0;color:#334155;font-size:0.74rem;line-height:1.6;">
-            You're receiving this because you subscribed at the
-            <a href="https://match82-wc2026-tracker.streamlit.app" style="color:#3b82f6;">
-            Match 82 Tracker</a>. No spam, ever.
-          </p>
-        </td></tr>
+  <!-- Body -->
+  <tr>
+    <td bgcolor="#0e1628" style="padding:24px 28px 8px;
+        border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;">
+      <p style="margin:0 0 12px 0;color:#cbd5e1;font-size:15px;line-height:1.8;
+                font-family:Arial,sans-serif;">{paragraph_html}</p>
+    </td>
+  </tr>
 
+  <!-- Divider -->
+  <tr>
+    <td bgcolor="#0e1628" style="padding:0 28px;
+        border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="border-top:1px solid #1e3a5f;font-size:0;line-height:0;">&nbsp;</td></tr>
       </table>
-    </td></tr>
-  </table>
+    </td>
+  </tr>
+
+  <!-- Chart section -->
+  <tr>
+    <td bgcolor="#0e1628" style="padding:20px 28px 28px;
+        border-left:1px solid #1e3a5f;border-right:1px solid #1e3a5f;">
+      <p style="margin:0 0 14px;color:#4a7fa5;font-size:11px;text-transform:uppercase;
+                letter-spacing:2px;font-weight:700;font-family:Arial,sans-serif;">
+        Most Probable Exact Matchups
+      </p>
+      {chart_html}
+      <p style="margin:12px 0 0;color:#334155;font-size:12px;font-family:Arial,sans-serif;">
+        Based on {n_sims:,}-trial Dixon-Coles / Elo Monte Carlo simulation.
+      </p>
+    </td>
+  </tr>
+
+  <!-- Footer -->
+  <tr>
+    <td bgcolor="#060c18" style="padding:16px 28px;border-radius:0 0 12px 12px;
+        border:1px solid #1e3a5f;border-top:1px solid #1e2a44;">
+      <p style="margin:0;color:#4a5568;font-size:12px;line-height:1.6;
+                font-family:Arial,sans-serif;">
+        You're receiving this because you signed up at the
+        <a href="https://match82-wc2026-tracker.streamlit.app"
+           style="color:#3b82f6;text-decoration:none;">Match 82 Tracker</a>.
+        No spam, ever.
+      </p>
+    </td>
+  </tr>
+
+</table>
+<!-- /Card -->
+
+</td></tr>
+</table>
+<!-- /Outer wrapper -->
+
 </body>
-</html>
-"""
+</html>"""
 
 
 def save_email_signup(email: str) -> bool:
