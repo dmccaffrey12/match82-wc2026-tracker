@@ -640,92 +640,107 @@ def get_third_place_record(group_table: dict[str, list], third_team: str) -> tup
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_polymarket_group_g_probs() -> dict[str, float] | None:
     """
-    Attempt to fetch Group G win probabilities from Polymarket's public API.
-    Returns {team_name: probability} or None if unavailable.
-    
-    Polymarket gamma API — no auth required for reads.
-    We search for the Group G winner market and parse outcome prices.
+    Fetch Group G win probabilities from Polymarket's CLOB API.
+    Returns {team_name: probability} normalized to sum to 1.0, or None.
+
+    Polymarket has individual Yes/No markets per team (not a single multi-outcome
+    market). We fetch the 'Yes' price for each team directly via condition ID,
+    then infer New Zealand's probability as the remainder.
+
+    Condition IDs discovered via:
+      https://clob.polymarket.com/sampling-markets?next_cursor=
+    No auth required.
     """
+    # Hardcoded condition IDs for Group G (Belgium, Egypt, Iran have liquid markets)
+    GROUP_G_CONDITIONS = {
+        "Belgium": "0x1e285f49c483634426c54834f840f6bfe780e0039eb0ad31357b936600b7c2d2",
+        "Egypt":   "0xd5f291e4d2dfc44a42ee0eb1d83f2e42a90ce943a71f643cadf4e98c5a6ec3eb",
+        "Iran":    "0x5bf2c54fb4ca9d63427816cd88ab8f7b5ede5b2b9166c366a940f1a0d6d0a290",
+    }
+    import urllib.request as _ur
+    result: dict[str, float] = {}
     try:
-        resp = requests.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"search": "World Cup 2026 Group G winner", "limit": 5},
-            timeout=5,
-        )
-        if resp.status_code != 200:
-            return None
-        markets = resp.json()
-        if not markets:
-            return None
-        
-        # Find the best matching market
-        mkt = None
-        for m in markets:
-            title = (m.get("question") or m.get("title") or "").lower()
-            if "group g" in title or ("group" in title and "belgium" in title):
-                mkt = m
-                break
-        if not mkt:
-            mkt = markets[0]
-        
-        # outcomePrices is a JSON-string array of prices, outcomes is a JSON-string array of names
-        import json
-        outcomes = json.loads(mkt.get("outcomes", "[]"))
-        prices   = json.loads(mkt.get("outcomePrices", "[]"))
-        
-        if not outcomes or not prices or len(outcomes) != len(prices):
-            return None
-        
-        result = {}
-        for name, price in zip(outcomes, prices):
-            prob = float(price)
-            # Match to our team names
-            for team in ["Belgium", "Egypt", "Iran", "New Zealand"]:
-                if team.lower() in name.lower():
-                    result[team] = prob
-                    break
-        
-        return result if result else None
-    
+        for team, cid in GROUP_G_CONDITIONS.items():
+            url = f"https://clob.polymarket.com/markets/{cid}"
+            req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _ur.urlopen(req, timeout=6) as r:
+                data = json.loads(r.read())
+            if data.get("closed"):
+                continue  # Market settled — skip
+            tokens = data.get("tokens", [])
+            yes_price = next(
+                (float(t["price"]) for t in tokens if t.get("outcome", "").lower() == "yes"),
+                None,
+            )
+            if yes_price is not None:
+                result[team] = yes_price
     except Exception:
         return None
 
+    if not result:
+        return None
 
-@st.cache_data(ttl=120, show_spinner=False)  
+    # Infer New Zealand as remainder (no liquid market exists for them)
+    nz_implied = max(0.0, 1.0 - sum(result.values()))
+    result["New Zealand"] = nz_implied
+
+    # Normalize to sum exactly to 1.0 (handles any over-round)
+    total = sum(result.values())
+    if total <= 0:
+        return None
+    return {t: p / total for t, p in result.items()}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
     """
-    Attempt to fetch 3rd-place qualification probabilities from Polymarket.
-    These markets exist for major teams (France, Argentina, Spain, Germany, Norway).
-    Returns {team_name: probability} or None.
+    Fetch group-win probabilities from Polymarket for the third-place eligible
+    groups (A, E, H, I, J). Uses hardcoded condition IDs for teams with active
+    liquid markets.
+
+    Returns {team_name: yes_price} — these are already ~probabilities of winning
+    their group, which we use as a proxy for 3rd-place advancement strength.
     """
-    teams_to_try = ["France", "Argentina", "Spain", "Germany", "Norway", "Uruguay", "Ecuador"]
-    result = {}
-    
+    # Condition IDs for group-winner markets in THIRD_PLACE_GROUPS (A/E/H/I/J)
+    # Only including teams with confirmed liquid markets
+    THIRD_PLACE_CONDITIONS = {
+        # Group A
+        "Mexico":      "0x6539e18b791b6107030843e6347040fb5e17211c9ba63b79db8bc0f162627821",
+        "South Korea": "0xb366117d881a5adac00775548d46fe437db5ac77ce1fc8af63a4cd6957c9a70d",
+        # Group E
+        "Germany":     "0x9c964b8dceb1b3fdf8ef5a53f24bd93a6d7464ef300ab11c336a7b791cdb6f3d",
+        "Ivory Coast": "0xa681d4cd61508a023cd9f194a0435421ad25db02d0db8a4aeb56ea97b1854716",
+        # Group H
+        "Spain":       "0x766aa2fb8fafc6f063de001e1d441d0e64d84f164093feb087226b47ffc32af1",
+        "Uruguay":     "0xd136f80c161a40baa5890a7792a2a5bf264de0d5ef2711a23e4564b429969ff8",  # Group H
+        # Group I
+        "France":      "0x4ae4a0aecfc6479374c5a9a355f0f0cba2c0680dff010b48a2c8b380423efd05",
+        "Norway":      "0x9da323e862ca9e583ae67a5130c8c79960cf173e7d76165cefd4ecd7f9333b90",
+        "Senegal":     "0x0174a32ce50b11c793acc6a643e1d583c99fa52016a319eab4052f9a59f4eb18",
+        # Group J
+        "Argentina":   "0x174018cba2df7afe76f434e8ca93e55c76f2eb13015a5caf941ce6d270ba6264",
+        "Algeria":     "0xa7b34c55da0fcd45908bbc802c5fbd5f650e9b4dbb8639bfcd32baee8c62e243",
+        "Austria":     "0xf8e8b9cd02f6658ad6011530ece2650290aa528c8e27c8e6ea16e742d4e764f7",
+    }
+    import urllib.request as _ur
+    result: dict[str, float] = {}
     try:
-        for team in teams_to_try:
-            resp = requests.get(
-                "https://gamma-api.polymarket.com/markets",
-                params={"search": f"{team} 2026 World Cup advance qualify", "limit": 3},
-                timeout=4,
-            )
-            if resp.status_code != 200:
+        for team, cid in THIRD_PLACE_CONDITIONS.items():
+            url = f"https://clob.polymarket.com/markets/{cid}"
+            req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _ur.urlopen(req, timeout=6) as r:
+                data = json.loads(r.read())
+            if data.get("closed"):
                 continue
-            markets = resp.json()
-            for m in markets:
-                title = (m.get("question") or m.get("title") or "").lower()
-                # We want "advance from group" style markets, not tournament winner
-                if ("advance" in title or "qualify" in title or "through" in title) and team.lower() in title:
-                    import json
-                    outcomes = json.loads(m.get("outcomes", "[]"))
-                    prices   = json.loads(m.get("outcomePrices", "[]"))
-                    for o, p in zip(outcomes, prices):
-                        if "yes" in o.lower():
-                            result[team] = float(p)
-                            break
-                    break
+            tokens = data.get("tokens", [])
+            yes_price = next(
+                (float(t["price"]) for t in tokens if t.get("outcome", "").lower() == "yes"),
+                None,
+            )
+            if yes_price is not None:
+                result[team] = yes_price
     except Exception:
         pass
-    
     return result if result else None
 
 
@@ -831,16 +846,20 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
     # Blend with market data if available
     methods = {}
     if use_markets:
-        mkt_g = fetch_polymarket_group_g_probs()
+        # ── Group G blend ────────────────────────────────────────────────────
+        mkt_g = fetch_polymarket_group_g_probs()  # Already normalized to 1.0
         if mkt_g:
             for team in GROUPS["G"]:
-                if team in mkt_g:
-                    blended, method = blend_mc_with_market(g_winner_prob[team], mkt_g[team])
-                    g_winner_prob[team] = blended
-                    methods[team] = method
-                else:
-                    methods[team] = "MC"
-        
+                mkt_p = mkt_g.get(team)
+                blended, method = blend_mc_with_market(g_winner_prob[team], mkt_p)
+                g_winner_prob[team] = blended
+                methods[team] = method
+            # Re-normalize Group G winner probs after blend
+            g_total = sum(g_winner_prob[t] for t in GROUPS["G"])
+            if g_total > 0:
+                g_winner_prob = {t: p / g_total for t, p in g_winner_prob.items()}
+
+        # ── Third-place blend ─────────────────────────────────────────────────
         mkt_3rd = fetch_polymarket_3rd_place_probs()
         if mkt_3rd:
             for team, mkt_p in mkt_3rd.items():
@@ -848,7 +867,27 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
                     blended, method = blend_mc_with_market(third_advance_prob[team], mkt_p)
                     third_advance_prob[team] = blended
                     methods[team] = method
-    
+
+        # ── Propagate blended Group G probs into match82_joint_prob ──────────
+        # The joint counts were built from raw MC; re-weight by blended g_winner_prob
+        if mkt_g:
+            # Compute original MC g_winner_prob for rescaling
+            mc_g_total = sum(g_winner_counts.values())
+            mc_g_prob_raw = {t: c / mc_g_total for t, c in g_winner_counts.items()} if mc_g_total else {}
+            new_joint: dict = {}
+            for (gw, third), prob in match82_joint_prob.items():
+                mc_raw = mc_g_prob_raw.get(gw, 0)
+                if mc_raw > 0:
+                    # Scale joint prob by ratio of blended to raw MC
+                    scale = g_winner_prob.get(gw, mc_raw) / mc_raw
+                    new_joint[(gw, third)] = prob * scale
+                else:
+                    new_joint[(gw, third)] = prob
+            # Re-normalize joint distribution
+            joint_total = sum(new_joint.values())
+            if joint_total > 0:
+                match82_joint_prob = {k: v / joint_total for k, v in new_joint.items()}
+
     return {
         "g_winner_prob":      g_winner_prob,
         "g_runnerup_prob":    g_runnerup_prob,
