@@ -744,6 +744,75 @@ def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
     return result if result else None
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def compute_market_third_place_probs() -> dict[str, dict] | None:
+    """
+    Use Polymarket group-win prices + Elo weights to infer P(finish 3rd) for
+    every team in the five eligible groups (A/E/H/I/J) via Plackett-Luce
+    Monte Carlo simulation.
+
+    Returns {team: {"group": str, "p_win": float, "p_3rd": float, "source": str}}
+    or None if Polymarket is unavailable.
+    """
+    mkt = fetch_polymarket_3rd_place_probs()  # {team: yes_price} for known teams
+    if not mkt:
+        return None
+
+    # Elo fallback weights for teams without Polymarket markets
+    ELO_FALLBACK = {
+        "Ecuador": 1750, "Poland": 1820, "Slovenia": 1690, "Bolivia": 1500,
+        "Qatar": 1620, "Zambia": 1380, "Saudi Arabia": 1650, "Venezuela": 1600,
+        "Serbia": 1810,
+    }
+
+    def elo_weight(elo: int) -> float:
+        return 10 ** (elo / 400)
+
+    def plackett_luce(raw: dict[str, float | None], n: int = 100_000) -> dict[str, dict]:
+        """Simulate placements via Gumbel-max trick (fast vectorized PL)."""
+        teams = list(raw.keys())
+        # Fill missing with Elo-derived residual
+        known_sum = sum(v for v in raw.values() if v is not None)
+        residual  = max(0.02, 1.0 - known_sum)
+        unknowns  = [t for t in teams if raw[t] is None]
+        elo_w     = {t: elo_weight(ELO_FALLBACK.get(t, 1600)) for t in unknowns}
+        elo_total = sum(elo_w.values()) if elo_w else 1.0
+        strengths = {
+            t: raw[t] if raw[t] is not None else residual * elo_w[t] / elo_total
+            for t in teams
+        }
+        s_total = sum(strengths.values())
+        s = np.array([strengths[t] / s_total for t in teams])
+        log_s = np.log(s + 1e-12)
+        rng = np.random.default_rng(0)
+        batch = 1000
+        nt = len(teams)
+        counts = np.zeros((nt, nt), dtype=np.int64)
+        for _ in range(n // batch):
+            g = rng.gumbel(size=(batch, nt))
+            ranks = np.argsort(-(log_s + g), axis=1)
+            for place in range(nt):
+                np.add.at(counts[:, place], ranks[:, place], 1)
+        total = (n // batch) * batch
+        result = {}
+        for i, t in enumerate(teams):
+            result[t] = {
+                "p_win": counts[i, 0] / total,
+                "p_3rd": counts[i, 2] / total,
+                "source": "MKT" if raw[t] is not None else "ELO",
+            }
+        return result
+
+    output: dict[str, dict] = {}
+    for grp in THIRD_PLACE_GROUPS:
+        raw: dict[str, float | None] = {t: mkt.get(t) for t in GROUPS[grp]}
+        placements = plackett_luce(raw)
+        for t, vals in placements.items():
+            output[t] = {"group": grp, **vals}
+
+    return output if output else None
+
+
 def blend_mc_with_market(mc_prob: float, market_prob: float | None, market_weight: float = 0.4) -> tuple[float, str]:
     """
     Blend Monte Carlo probability with market-implied probability.
@@ -1985,7 +2054,111 @@ def main() -> None:
         st.plotly_chart(build_third_place_bar(mc), use_container_width=True)
     
     st.markdown("---")
-    
+
+    # ── MARKET-IMPLIED 3RD PLACE RACE ───────────────────────────────────────────
+    mkt_3rd = compute_market_third_place_probs()
+    if mkt_3rd:
+        st.markdown("## 🎰 3rd Place Race — Market View")
+        st.caption(
+            "Polymarket group-win prices fed into a Plackett-Luce model to infer "
+            "P(finish 3rd) per team. Teams without a Polymarket market use Elo as a "
+            "fallback weight. **MKT** = market-priced · **ELO** = Elo fallback."
+        )
+
+        # ── Per-group breakdown ──────────────────────────────────────────────
+        grp_tabs = st.tabs([f"Group {g}" for g in THIRD_PLACE_GROUPS])
+        for tab, grp in zip(grp_tabs, THIRD_PLACE_GROUPS):
+            with tab:
+                grp_teams = [
+                    (t, mkt_3rd[t]) for t in GROUPS[grp] if t in mkt_3rd
+                ]
+                grp_teams.sort(key=lambda x: -x[1]["p_3rd"])
+                rows = []
+                for t, d in grp_teams:
+                    rows.append({
+                        "Team": f"{FLAG_MAP.get(t,'🏳️')} {t}",
+                        "Source": d["source"],
+                        "P(Win Group) %": round(d["p_win"] * 100, 1),
+                        "P(Finish 3rd) %": round(d["p_3rd"] * 100, 1),
+                    })
+                df_grp = pd.DataFrame(rows)
+                st.dataframe(
+                    df_grp,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "P(Win Group) %": st.column_config.ProgressColumn(
+                            "P(Win Group) %", min_value=0, max_value=100, format="%.1f%%"
+                        ),
+                        "P(Finish 3rd) %": st.column_config.ProgressColumn(
+                            "P(Finish 3rd) %", min_value=0, max_value=100, format="%.1f%%"
+                        ),
+                    },
+                )
+
+        # ── Cross-group leaderboard ──────────────────────────────────────────
+        st.markdown("### Most Likely Match 82 Opponents (3rd Place)")
+        st.caption(
+            "Ranked by P(finish 3rd in their group). Top 8 third-place teams "
+            "across all 12 groups advance — only Groups A/E/H/I/J are eligible "
+            "to face the Group G winner at Match 82."
+        )
+
+        all_rows = []
+        for t, d in mkt_3rd.items():
+            all_rows.append({
+                "Team": f"{FLAG_MAP.get(t,'🏳️')} {t}",
+                "Group": d["group"],
+                "Source": d["source"],
+                "P(Win Group) %": round(d["p_win"] * 100, 1),
+                "P(Finish 3rd) %": round(d["p_3rd"] * 100, 1),
+            })
+        all_rows.sort(key=lambda x: -x["P(Finish 3rd) %"])
+        df_all = pd.DataFrame(all_rows)
+        st.dataframe(
+            df_all,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "P(Win Group) %": st.column_config.ProgressColumn(
+                    "P(Win Group) %", min_value=0, max_value=100, format="%.1f%%"
+                ),
+                "P(Finish 3rd) %": st.column_config.ProgressColumn(
+                    "P(Finish 3rd) %", min_value=0, max_value=100, format="%.1f%%"
+                ),
+            },
+        )
+
+        # ── Small print on methodology ───────────────────────────────────────
+        with st.expander("Methodology", expanded=False):
+            st.markdown("""
+**Model**: Plackett-Luce placement simulation (100k draws per group).
+
+For each group, team strength is set equal to their Polymarket group-win
+price ("Yes" price on the CLOB). Teams without a liquid market (typically
+the weakest team in the group) receive a strength proportional to their
+Elo rating scaled to the residual probability mass left after the known
+markets are priced in.
+
+The Gumbel-max trick converts these strengths into a full placement
+distribution — P(1st), P(2nd), P(3rd), P(4th) — in a single vectorized
+Monte Carlo pass. This is mathematically equivalent to a random-utility
+model where each team's latent performance draw is `log(strength) + Gumbel(0,1)`.
+
+**Important caveat**: P(finish 3rd in group) ≠ P(advance to Round of 32).
+Only the top 8 third-place teams across all 12 groups advance. The full
+Monte Carlo engine (left panel) models the global ranking step explicitly.
+""")
+    else:
+        # Polymarket unavailable — show a quiet note
+        if use_markets:
+            st.info(
+                "Polymarket data unavailable right now — toggle off to use pure MC.",
+                icon="🟣",
+            )
+
+    st.markdown("---")
+
     # ── LIVE STANDINGS TABLE ────────────────────────────────────────────────────
     st.markdown("## 📋 Current Standings")
     
