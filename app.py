@@ -229,15 +229,33 @@ def fetch_standings_from_api() -> dict[str, dict] | None:
     # football-data.org uses different spellings for some teams.
     # Map their names -> our canonical GROUPS names.
     NAME_MAP = {
-        "Ivory Coast":          "Côte d'Ivoire",
-        "Côte D'Ivoire":        "Côte d'Ivoire",
-        "Cote d'Ivoire":        "Côte d'Ivoire",
-        "IR Iran":              "Iran",
-        "Korea Republic":       "South Korea",
-        "Republic of Ireland":  "Ireland",
-        "USA":                  "United States",
-        "Curacao":              "Curaçao",
-        "Türkiye":              "Turkey",
+        # Ivory Coast / Côte d'Ivoire
+        "Ivory Coast":              "Côte d'Ivoire",
+        "Côte D'Ivoire":            "Côte d'Ivoire",
+        "Cote d'Ivoire":            "Côte d'Ivoire",
+        "Cote D'Ivoire":            "Côte d'Ivoire",
+        # Cabo Verde (football-data.org uses "Cape Verde")
+        "Cape Verde":               "Cabo Verde",
+        "Cape Verde Islands":        "Cabo Verde",
+        "Cabo Verde":               "Cabo Verde",  # already correct, belt-and-suspenders
+        # Korea
+        "Korea Republic":           "South Korea",
+        "Republic of Korea":        "South Korea",
+        "Korea DPR":                "North Korea",
+        # Iran
+        "IR Iran":                  "Iran",
+        # Curaçao
+        "Curacao":                  "Curaçao",
+        # Türkiye
+        "Turkey":                   "Türkiye",
+        # USA
+        "United States":            "USA",
+        "United States of America": "USA",
+        # Misc
+        "Republic of Ireland":      "Ireland",
+        "Bosnia & Herzegovina":     "Bosnia and Herzegovina",
+        "North Macedonia":          "North Macedonia",
+        "Trinidad & Tobago":        "Trinidad and Tobago",
     }
     standings: dict[str, dict] = {}
     for group_block in data.get("standings", []):
@@ -274,36 +292,41 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Morocco":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
     "Brazil":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
     "Haiti":        {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
-    # Group D — USA 4-1 Paraguay; Australia 2-0 Türkiye (not yet official — placeholder)
+    # Group D — USA 4-1 Paraguay; Australia 2-0 Türkiye
     "USA":          {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
     "Australia":    {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":0},
     "Türkiye":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":2},
     "Paraguay":     {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
-    # Groups E–L — no matches played yet
+    # Group E — Germany 7-1 Curaçao; Côte d'Ivoire 1-0 Ecuador
     "Germany":      {"mp":1,"w":1,"d":0,"l":0,"gf":7,"ga":1},
-    "Ecuador":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
     "Côte d'Ivoire":{"mp":1,"w":1,"d":0,"l":0,"gf":1,"ga":0},
+    "Ecuador":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
     "Curaçao":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":7},
-    "Netherlands":  {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Japan":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Sweden":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Tunisia":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Belgium":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Egypt":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Iran":         {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "New Zealand":  {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Spain":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Uruguay":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Saudi Arabia": {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Cabo Verde":   {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "France":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Senegal":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Norway":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Iraq":         {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Argentina":    {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Algeria":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Austria":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Jordan":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    # Group F — Sweden 5-1 Tunisia; Netherlands 2-2 Japan
+    "Sweden":       {"mp":1,"w":1,"d":0,"l":0,"gf":5,"ga":1},
+    "Japan":        {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
+    "Netherlands":  {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
+    "Tunisia":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":5},
+    # Group G — Belgium 1-1 Egypt; Iran 2-2 New Zealand
+    "Belgium":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Egypt":        {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Iran":         {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
+    "New Zealand":  {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
+    # Group H — Spain 0-0 Cabo Verde; Saudi Arabia 1-1 Uruguay
+    "Spain":        {"mp":1,"w":0,"d":1,"l":0,"gf":0,"ga":0},
+    "Cabo Verde":   {"mp":1,"w":0,"d":1,"l":0,"gf":0,"ga":0},
+    "Saudi Arabia": {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    "Uruguay":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    # Group I — France 3-1 Senegal; Norway 4-1 Iraq
+    "France":       {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
+    "Norway":       {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
+    "Senegal":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":3},
+    "Iraq":         {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
+    # Group J — Argentina 3-0 Algeria; Austria 3-1 Jordan
+    "Argentina":    {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":0},
+    "Austria":      {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
+    "Jordan":       {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":3},
+    "Algeria":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":3},
     "Portugal":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
     "Colombia":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
     "Uzbekistan":   {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
