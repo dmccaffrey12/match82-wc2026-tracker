@@ -954,10 +954,23 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
         mkt_3rd = fetch_polymarket_3rd_place_probs()
         if mkt_3rd:
             for team, mkt_p in mkt_3rd.items():
-                if team in third_advance_prob:
-                    blended, method = blend_mc_with_market(third_advance_prob[team], mkt_p)
-                    third_advance_prob[team] = blended
-                    methods[team] = method
+                if team not in third_advance_prob:
+                    continue
+                # The market price here is P(win group), not P(finish 3rd).
+                # Blending it directly against third_advance_prob is only valid
+                # for genuine 3rd-place candidates (low group-win probability).
+                # Teams heavily favored to WIN their group (mkt_p > 0.50) should
+                # NOT have their 3rd-place advance prob pushed up by their high
+                # group-win price — skip the blend for them.
+                if mkt_p > 0.50:
+                    methods[team] = "MC"  # market signal irrelevant for 3rd place
+                    continue
+                # For genuine 3rd-place candidates, invert: higher group-win price
+                # means LESS likely to finish 3rd. Use (1 - mkt_p) as the signal.
+                third_signal = 1.0 - mkt_p
+                blended, method = blend_mc_with_market(third_advance_prob[team], third_signal)
+                third_advance_prob[team] = blended
+                methods[team] = method
 
         # ── Propagate blended Group G probs into match82_joint_prob ──────────
         # The joint counts were built from raw MC; re-weight by blended g_winner_prob
@@ -1914,11 +1927,20 @@ def main() -> None:
     g_leader = max(mc["g_winner_prob"], key=mc["g_winner_prob"].get)
     g_leader_p = mc["g_winner_prob"][g_leader]
     
-    # Best 3rd-place candidate in eligible groups
-    eligible_3rd_probs = {t: mc["third_advance_prob"].get(t, 0)
-                          for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]}
-    best_3rd = max(eligible_3rd_probs, key=eligible_3rd_probs.get)
-    best_3rd_p = eligible_3rd_probs[best_3rd]
+    # Best 3rd-place candidate: sum joint prob over all Group G winners per opponent.
+    # This correctly reflects both P(team reaches Match 82 as 3rd) AND
+    # P(Group G produces a winner), giving a true matchup-weighted signal.
+    eligible_3rd_joint = {}
+    for (gw, third), prob in mc["match82_joint_prob"].items():
+        eligible_3rd_joint[third] = eligible_3rd_joint.get(third, 0) + prob
+    if eligible_3rd_joint:
+        best_3rd = max(eligible_3rd_joint, key=eligible_3rd_joint.get)
+        best_3rd_p = mc["third_advance_prob"].get(best_3rd, 0)  # show advance prob in label
+    else:
+        eligible_3rd_probs = {t: mc["third_advance_prob"].get(t, 0)
+                              for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]}
+        best_3rd = max(eligible_3rd_probs, key=eligible_3rd_probs.get)
+        best_3rd_p = eligible_3rd_probs[best_3rd]
     
     top_joint = max(mc["match82_joint_prob"].values()) if mc["match82_joint_prob"] else 0
     
