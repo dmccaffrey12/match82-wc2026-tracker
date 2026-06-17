@@ -226,12 +226,26 @@ def fetch_standings_from_api() -> dict[str, dict] | None:
     except Exception as e:
         st.warning(f"⚠️ football-data.org fetch failed: {e}")
         return None
+    # football-data.org uses different spellings for some teams.
+    # Map their names -> our canonical GROUPS names.
+    NAME_MAP = {
+        "Ivory Coast":          "Côte d'Ivoire",
+        "Côte D'Ivoire":        "Côte d'Ivoire",
+        "Cote d'Ivoire":        "Côte d'Ivoire",
+        "IR Iran":              "Iran",
+        "Korea Republic":       "South Korea",
+        "Republic of Ireland":  "Ireland",
+        "USA":                  "United States",
+        "Curacao":              "Curaçao",
+        "Türkiye":              "Turkey",
+    }
     standings: dict[str, dict] = {}
     for group_block in data.get("standings", []):
         for row in group_block.get("table", []):
-            name = row.get("team", {}).get("name", "").strip()
-            if not name:
+            raw_name = row.get("team", {}).get("name", "").strip()
+            if not raw_name:
                 continue
+            name = NAME_MAP.get(raw_name, raw_name)
             standings[name] = {
                 "mp": int(row.get("playedGames", 0)),
                 "w":  int(row.get("won",         0)),
@@ -266,10 +280,10 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Türkiye":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":2},
     "Paraguay":     {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
     # Groups E–L — no matches played yet
-    "Germany":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Ecuador":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Côte d'Ivoire":{"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Curaçao":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    "Germany":      {"mp":1,"w":1,"d":0,"l":0,"gf":7,"ga":1},
+    "Ecuador":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
+    "Côte d'Ivoire":{"mp":1,"w":1,"d":0,"l":0,"gf":1,"ga":0},
+    "Curaçao":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":7},
     "Netherlands":  {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
     "Japan":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
     "Sweden":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
