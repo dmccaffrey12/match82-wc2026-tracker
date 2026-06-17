@@ -705,19 +705,20 @@ def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
     # Only including teams with confirmed liquid markets
     THIRD_PLACE_CONDITIONS = {
         # Group A
+        # Group A — Mexico, South Korea, Czechia, South Africa
         "Mexico":      "0x6539e18b791b6107030843e6347040fb5e17211c9ba63b79db8bc0f162627821",
         "South Korea": "0xb366117d881a5adac00775548d46fe437db5ac77ce1fc8af63a4cd6957c9a70d",
-        # Group E
-        "Germany":     "0x9c964b8dceb1b3fdf8ef5a53f24bd93a6d7464ef300ab11c336a7b791cdb6f3d",
-        "Ivory Coast": "0xa681d4cd61508a023cd9f194a0435421ad25db02d0db8a4aeb56ea97b1854716",
-        # Group H
+        # Group E — Germany, Côte d'Ivoire, Ecuador, Curaçao
+        "Germany":       "0x9c964b8dceb1b3fdf8ef5a53f24bd93a6d7464ef300ab11c336a7b791cdb6f3d",
+        "Côte d'Ivoire": "0xa681d4cd61508a023cd9f194a0435421ad25db02d0db8a4aeb56ea97b1854716",
+        # Group H — Spain, Uruguay, Qatar, Zambia
         "Spain":       "0x766aa2fb8fafc6f063de001e1d441d0e64d84f164093feb087226b47ffc32af1",
-        "Uruguay":     "0xd136f80c161a40baa5890a7792a2a5bf264de0d5ef2711a23e4564b429969ff8",  # Group H
-        # Group I
+        "Uruguay":     "0xd136f80c161a40baa5890a7792a2a5bf264de0d5ef2711a23e4564b429969ff8",
+        # Group I — France, Norway, Senegal, Saudi Arabia
         "France":      "0x4ae4a0aecfc6479374c5a9a355f0f0cba2c0680dff010b48a2c8b380423efd05",
         "Norway":      "0x9da323e862ca9e583ae67a5130c8c79960cf173e7d76165cefd4ecd7f9333b90",
         "Senegal":     "0x0174a32ce50b11c793acc6a643e1d583c99fa52016a319eab4052f9a59f4eb18",
-        # Group J
+        # Group J — Argentina, Algeria, Austria, Serbia
         "Argentina":   "0x174018cba2df7afe76f434e8ca93e55c76f2eb13015a5caf941ce6d270ba6264",
         "Algeria":     "0xa7b34c55da0fcd45908bbc802c5fbd5f650e9b4dbb8639bfcd32baee8c62e243",
         "Austria":     "0xf8e8b9cd02f6658ad6011530ece2650290aa528c8e27c8e6ea16e742d4e764f7",
@@ -760,8 +761,15 @@ def compute_market_third_place_probs() -> dict[str, dict] | None:
 
     # Elo fallback weights for teams without Polymarket markets
     ELO_FALLBACK = {
-        "Ecuador": 1750, "Poland": 1820, "Slovenia": 1690, "Bolivia": 1500,
-        "Qatar": 1620, "Zambia": 1380, "Saudi Arabia": 1650, "Venezuela": 1600,
+        # Group A no-market teams
+        "Czechia": 1780, "South Africa": 1550,
+        # Group E no-market teams
+        "Ecuador": 1750, "Curaçao": 1380,
+        # Group H no-market teams
+        "Qatar": 1620, "Zambia": 1380,
+        # Group I no-market teams
+        "Saudi Arabia": 1650,
+        # Group J no-market teams
         "Serbia": 1810,
     }
 
