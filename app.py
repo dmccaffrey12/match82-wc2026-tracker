@@ -265,6 +265,15 @@ def compute_tournament_elos() -> dict[str, float]:
         actual_a = 1.0 - actual_h
         ratings[home] = r_h + K * (actual_h - expected_h)
         ratings[away]  = r_a + K * (actual_a - expected_a)
+
+    # ── Elimination suppression ────────────────────────────────────────────
+    # Teams that Polymarket considers functionally eliminated (tourney-win
+    # price ≤ 0.5% OR advance price ≤ 2%) have their Elo discounted to a
+    # floor of 1200. This prevents eliminated teams like Türkiye from
+    # accumulating unrealistically high simulated point totals and crowding
+    # out genuine 3rd-place contenders in the Monte Carlo.
+    # We skip this inside compute_tournament_elos itself (it's cached) and
+    # let simulate_match apply the discount inline instead.
     return ratings
 
 
@@ -533,6 +542,7 @@ DARK_CSS = """
   .method-pill { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
   .method-mc { background: #0f2d4a; color: #38bdf8; border: 1px solid #1e4a6e; }
   .method-mkt { background: #1a0f4a; color: #a78bfa; border: 1px solid #3b2a6e; }
+  .method-elim { background: #2d0f0f; color: #f87171; border: 1px solid #6e1e1e; }
   .method-blend { background: #1a2e0f; color: #86efac; border: 1px solid #2a4e1e; }
 
   /* ── Mobile responsiveness ── */
@@ -682,6 +692,24 @@ def simulate_scoreline(lam_h: float, lam_a: float, max_goals: int = 8) -> tuple[
             return int(gh), int(ga)
 
 
+# Module-level eliminated-team cache: refreshed once per MC run via TTL on
+# the Polymarket fetchers. Avoids hitting the API inside the hot sim loop.
+_ELIMINATED_CACHE: tuple[float, set[str]] = (0.0, set())
+_ELIM_CACHE_TTL = 120.0  # seconds
+
+def _get_eliminated_cache() -> set[str]:
+    """Return cached set of eliminated teams (refreshes every 120s)."""
+    global _ELIMINATED_CACHE
+    ts, elim_set = _ELIMINATED_CACHE
+    if time.time() - ts > _ELIM_CACHE_TTL:
+        try:
+            elim_set = get_eliminated_teams(use_markets=True)
+        except Exception:
+            elim_set = set()
+        _ELIMINATED_CACHE = (time.time(), elim_set)
+    return elim_set
+
+
 def simulate_match(
     team_a: str,
     team_b: str,
@@ -695,6 +723,13 @@ def simulate_match(
     ratings = elo_ratings or ELO
     elo_a = ratings.get(team_a, ELO.get(team_a, 1700))
     elo_b = ratings.get(team_b, ELO.get(team_b, 1700))
+    # Eliminate discount: teams the market has written off get a floor Elo
+    # of 1200, making them heavy underdogs in every simulated match.
+    # We use a module-level cache so we're not hitting Polymarket on
+    # every single match simulation (millions of calls per MC run).
+    _elim = _get_eliminated_cache()
+    if team_a in _elim: elo_a = min(elo_a, 1200.0)
+    if team_b in _elim: elo_b = min(elo_b, 1200.0)
     lam_a, lam_b = expected_goals(elo_a, elo_b)
     return simulate_scoreline(lam_a, lam_b)
 
@@ -826,134 +861,289 @@ def fetch_polymarket_group_g_probs() -> dict[str, float] | None:
     return {t: p / total for t, p in result.items()}
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
-    """
-    Fetch group-win probabilities from Polymarket for the third-place eligible
-    groups (A, E, H, I, J). Uses hardcoded condition IDs for teams with active
-    liquid markets.
+# ─────────────────────────────────────────────────────────────────────────────
+# POLYMARKET — ADVANCE-TO-KNOCKOUT MARKET  (primary signal)
+# "World Cup: Team to advance to Knockout Stages" — 48 teams, $6.4M volume
+# Resolves YES if team advances by any means (1st, 2nd, or qualifying 3rd)
+# This is the most direct signal we have: Ecuador at 25.5% means the market
+# collectively believes there's only a ~25% chance Ecuador makes the R32.
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Returns {team_name: yes_price} — these are already ~probabilities of winning
-    their group, which we use as a proxy for 3rd-place advancement strength.
+# Condition IDs from gamma-api.polymarket.com event:
+# slug=world-cup-team-to-advance-to-knockout-stages
+ADVANCE_CONDITIONS: dict[str, str] = {
+    # Group A
+    "Mexico":                  "0x765c607f355d16dcab5ac2cdd29a37779d1428a071b866bf767badc62346ec6c",
+    "South Korea":             "0x550d74a2fe47a7ce066e04e647da4010a2ac26e8aa1f0edcb9403ce90d0c9016",
+    "Czechia":                 "0x390b496499262807b909b58a9aaa95f6ae0b322d4a324531a3e97b2937904eda",
+    "South Africa":            "0x601d0d0b6e93e27832d2ecf4482e4fe9fed604cd0a29e7962b09a1d764fb4250",
+    # Group B
+    "Switzerland":             "0xeea6fafcf500f582bf1999d504b769befcceb645a7ed46c29aeb901d0ea29baf",
+    "Canada":                  "0x655712b319987805e573590082fbe8bd688f64fb5fc53b8516d397763e6b3cf4",
+    "Qatar":                   "0x3a6c34249d718a5bff78608e20b5cddefe722b73d5515524779747afb9c2a068",
+    "Bosnia":                  "0x9a2b2aeccf873af12a6171722d70d86e458492424a7adb700b011ca3b7cc28e7",
+    # Group C
+    "Brazil":                  "0xbc94d393aa6c0c1a3c8c23f0ab2f45e95d05cfd50266a993c582e84c5117d984",
+    "Morocco":                 "0x6ad7d53bc2a42daa2b9625eebf9651fd3aac1286078697182a3d1dc3bbd70173",
+    "Scotland":                "0x73f6028060ff88ff0369307f2c45dde79a5e7d7c437c4987638def21d065bac7",
+    "Haiti":                   "0x5ea45b0916e7ff547035047d0bd72502c1d1431c6196215f532741e14f997317",
+    # Group D
+    "USA":                     "0x6bac5bbce7d0ef0a0e036fea1eb9ec66835c9795a553e766fa305b3a8b065d93",
+    "Australia":               "0x38f5caccf3b53ef5abeb0056838e4e5df3f000e97a4fad7eb55431781b427d2c",
+    "Türkiye":                 "0x8c28874af6349a7e58f30909eecac5197bfdaa033b03ad98510853958ee41558",
+    "Paraguay":                "0x0cbb73759bb6ad83040cc6edb908a7dbd51855618082d2f5dd3b58937a79b306",
+    # Group E
+    "Germany":                 "0xb8316d5b3cbd3a92e130a27a93c8eaf8faa29a09b3b3287787b621686889f9f5",
+    "Ecuador":                 "0x8d84206ebda85fe26ac0f413f463c7029887a95c5bbc344e266bf4f0a0c2659d",
+    "Côte d'Ivoire":           "0xf1b5eddb0ee3c3398c161f731d21f170342feb192f7c0263d9baa7cbb6c1c31b",
+    "Curaçao":                 "0x62623e36db475ec25adf71f602ec64dab863e906365e7b27804f8e72a85e7dbe",
+    # Group F
+    "Netherlands":             "0x2deac4e9149d7933e977be2a572b46d427b5b52308553e385a42c8e9855ba536",
+    "Japan":                   "0x9e91380150cd0739da220168cfc99a129a7b6f7dd89e28ae48ae60e5749ca699",
+    "Sweden":                  "0xbea8b7504ec86c42abb39512b385c4dc695ba6c1d3f4d3aa9dd0ceddb0957338",
+    "Tunisia":                 "0xebbdac391050303b03d01e3f53ee84050698d01a04dbeace9ecda45daef6fb4d",
+    # Group G
+    "Belgium":                 "0xc0d63027b98472e48bacae3726cb9cd1929f0c31f91a791b6d5e773b390a3238",
+    "Egypt":                   "0x19eff468ad0ffce9ade9f41d3d323c42e48981a28772b47618d4ef77c7333c55",
+    "Iran":                    "0xc2fcce9165ac160807304db5dc0ec730dfd6d17c02a23c0dafce10a471833725",
+    "New Zealand":             "0x46d7512f30ec5b01e8194cf42457a041ca9bf675e4f58b32edcde8b3c431d18a",
+    # Group H
+    "Spain":                   "0xbdb9f8af2767fa217f65b2a970a9ec46f88fcf3a96e94421a3b51bc8cda1e12a",
+    "Uruguay":                 "0xbafadf181195da28073877849e2a4601a2f4a99371bf94e24e8a6380c7baa072",
+    "Saudi Arabia":            "0xe28714396c63822d0c1293f2aad16aaca02a143a32f20b71fd7fb58f078d6602",
+    "Cabo Verde":              "0xf75a1084ea00a19ec34957397ea4d0a33258395ba6b50a2d4186ee0f77910c25",
+    # Group I
+    "France":                  "0x6f814a95b780d7e8b14e9a8ce9d34f7afa1b25be62830aefb3781a6aa9afbf16",
+    "Senegal":                 "0x59ffd52a92c4afe5257997bbb6ecb38a260eb2ef4f8da31f0271fe48d35b8622",
+    "Norway":                  "0x35e0edf13c676c05379882d01980fb360b7885884d56c57f228cd306018efb3d",
+    "Iraq":                    "0xcb1bcc07313aefb781b5e6426625e525d4071c93d2115a558808ef4495da50a4",
+    # Group J
+    "Argentina":               "0x8e534d6f28c124e3d7414561be384e79c4b108420d1c43a9a965289e2ec25576",
+    "Algeria":                 "0xa8cc82d418a2a52f1a8af46d00f8b87353b1926b1e59add939946c195e8f541f",
+    "Austria":                 "0xbd0d83e891497ded91678ee5a6d58dede9b8f1adad52fa3e0b534359b737302c",
+    "Jordan":                  "0xb2ddb90e1715deedf1fb1a1422aed272d2a1141f8e5e0ca6f1accb3a21a5eb77",
+    # Group K
+    "Portugal":                "0x94cac3a7ff4e968e68674c8dff21d74df39c9519291db5e4628486f977b1cad5",
+    "Colombia":                "0x260688608f7d98c9cc5755228dbf4a04eb72c13308e603ba697b5f1ff4e8fe68",
+    "Uzbekistan":              "0x77cdf10e0cbddb64775d735d882925631edcdbf84f23316e23d0d4be83636b30",
+    "DR Congo":                "0xf53b6c5f8c269fb2c6fe8547a8356b6d57084a5d15502672165be922d58c46d6",
+    # Group L
+    "England":                 "0x1b37d3e123b994a315fc445ab4fdbb94bb2fa111437b6305a44a7fcd18c3d217",
+    "Croatia":                 "0x339817a52eeb97cc6cf99afee47a61dbc83244a4266a947d19f9b21aa9d7bbd3",
+    "Ghana":                   "0x2d93d3f277602a22f90c8ddcfd775945542d6b4a99449db03489de13609f3290",
+    "Panama":                  "0x71c3fec5d09820f4bc86f4c3c0c4c750190fcdcd3009d3454629073c8f7e02ec",
+}
+
+# Tournament-win condition IDs ("Will X win the 2026 FIFA World Cup?")
+# Used to detect functional elimination: price <= ELIM_THRESHOLD → treat as out
+TOURNEY_WIN_CONDITIONS: dict[str, str] = {
+    "Spain":        "0x7976b8dbacf9077eb1453a62bcefd6ab2df199acd28aad276ff0d920d6992892",
+    "France":       "0x9b6fef249040fd17e9c107955b37ac2c3e923509b6b0ff01cc463a331ddeb894",
+    "Argentina":    "0x0c4cd2055d6ea89354ffddc55d6dbcef9355748112ea952fc925f3db6a5c457f",
+    "Germany":      "0x1595b4818eeb1ea1e0bec5de6f057218e557feee9b405a0e930d290384fa1d16",
+    "Belgium":      "0x32cfa52198e85e070d1b17d1b53c5c3a6aaae7736cdc33fa6aa04d353f0c2811",
+    "Norway":       "0x7b52405ad0e0d31bfe970940b67d77f24ecedeab8a2361c11148c02a006e325c",
+    "Uruguay":      "0x7876851632c295043c66536150a304cb785abdf712ba8489d298c6e6926be106",
+    "Mexico":       "0x5ccfe1b69a582d2985db08a8481a0d74c314b1fce9b4711ae2efb2c6467fe6aa",
+    "Morocco":      "0x37a6de1b21803e5f3fb1965116218215d79963af4f7e51659696366267a63a03",
+    "Egypt":        "0x7412d284c8f63791fec807f9b1f61c6fe61163621775a3dc8686cd2575272abe",
+    "New Zealand":  "0x9e5f9d8c384f8fe368b195fa9a780be58643dff7360588a4e577012df8af00a7",
+    "Iran":         "0x84edef36bded182da6a395ac6c785dba8f3e09b6c5ad041385b2042536cbef25",
+    "South Korea":  "0x65307f30dce84ac35e41813035d3c04933da830dc4efbbb2fcdc4b282700ef3b",
+    "Algeria":      "0x5a59d269c2b5108cd2f64c624e46ee2c8b5cfd88b882582565f927918315b6aa",
+    "Senegal":      "0x6972edb1b3f8cd8192651a665fc424dff846efe1c4a2376f628d4b20c704144c",
+    "Côte d'Ivoire":"0x289568d555ec620ed6fa33c936c5f42649d3a2e30748a1daf7079f42453fbea4",
+    "Austria":      "0xfe230d510eaf545198c0d62bb17871e5fe8989f1b19aa54c0c062b858360987c",
+    "Saudi Arabia": "0x3fb8a8de2ac275882d72b2c4f22d41776fcf033f9e413a77a84dd395c0d5257c",
+    "Scotland":     "0xf950740bc71136155d6525cc0528a582c81f88812bff227803190c32ca25f54d",
+    "Cabo Verde":   "0x3bc69cb672591e4fcd2ef856b64b219a906e15d4601b50066ac81a446574dfaf",
+    "Qatar":        "0x4fe305a2ae995a52ff278895344895fe587b4fec3d5f04347b4dbf5e99bce99c",
+    "Switzerland":  "0x3a26ca6425e2d98f14935670bc22cdb0744defc6f6d83c65f8c413a921c5c70c",
+    "Japan":        "0x0189df05ed7bf84d799213b01a79571e305c03b2ac5359cfbb3a323448ba20fa",
+    "Ecuador":      "0xbaf7780f9059e34b84301fd411f8dc573b4d56adfe6e0cda33daf304b1438da4",
+    "Paraguay":     "0x675bba4df50fd123f7fbfbafa67e9b75f4092d85ce0f9148ce78fc945964c856",
+    "Australia":    "0x098e2be3df8ab529940c567819f8ef007cf007820e9d627642a5bbfaa42af372",
+    "Jordan":       "0x33a87d02fa01e958929385c74b8627d32cc4474e9ebd312d268865c5207147fa",
+}
+
+# A team is treated as functionally eliminated when its tournament-win price
+# is at or below this threshold (0.5%). Türkiye, Qatar, Iraq, Curaçao, etc.
+ELIM_THRESHOLD = 0.005  # 0.5%
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_polymarket_advance_probs() -> dict[str, float]:
     """
-    # Condition IDs for group-winner markets in THIRD_PLACE_GROUPS (A/E/H/I/J)
-    # Only including teams with confirmed liquid markets
-    THIRD_PLACE_CONDITIONS = {
-        # Group A
-        # Group A — Mexico, South Korea, Czechia, South Africa
-        "Mexico":      "0x6539e18b791b6107030843e6347040fb5e17211c9ba63b79db8bc0f162627821",
-        "South Korea": "0xb366117d881a5adac00775548d46fe437db5ac77ce1fc8af63a4cd6957c9a70d",
-        # Group E — Germany, Côte d'Ivoire, Ecuador, Curaçao
-        "Germany":       "0x9c964b8dceb1b3fdf8ef5a53f24bd93a6d7464ef300ab11c336a7b791cdb6f3d",
-        "Côte d'Ivoire": "0xa681d4cd61508a023cd9f194a0435421ad25db02d0db8a4aeb56ea97b1854716",
-        # Group H — Spain, Uruguay, Qatar, Zambia
-        "Spain":       "0x766aa2fb8fafc6f063de001e1d441d0e64d84f164093feb087226b47ffc32af1",
-        "Uruguay":     "0xd136f80c161a40baa5890a7792a2a5bf264de0d5ef2711a23e4564b429969ff8",
-        # Group I — France, Norway, Senegal, Saudi Arabia
-        "France":      "0x4ae4a0aecfc6479374c5a9a355f0f0cba2c0680dff010b48a2c8b380423efd05",
-        "Norway":      "0x9da323e862ca9e583ae67a5130c8c79960cf173e7d76165cefd4ecd7f9333b90",
-        "Senegal":     "0x0174a32ce50b11c793acc6a643e1d583c99fa52016a319eab4052f9a59f4eb18",
-        # Group J — Argentina, Algeria, Austria, Serbia
-        "Argentina":   "0x174018cba2df7afe76f434e8ca93e55c76f2eb13015a5caf941ce6d270ba6264",
-        "Algeria":     "0xa7b34c55da0fcd45908bbc802c5fbd5f650e9b4dbb8639bfcd32baee8c62e243",
-        "Austria":     "0xf8e8b9cd02f6658ad6011530ece2650290aa528c8e27c8e6ea16e742d4e764f7",
-    }
+    Fetch P(advance to R32) from Polymarket's 48-team knockout market.
+    Returns {team: probability} for every team with an active market.
+    N/A / closed markets return 0.0 (resolved as eliminated).
+    Falls back to empty dict on total failure.
+    """
     import urllib.request as _ur
     result: dict[str, float] = {}
     try:
-        for team, cid in THIRD_PLACE_CONDITIONS.items():
-            url = f"https://clob.polymarket.com/markets/{cid}"
-            req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with _ur.urlopen(req, timeout=6) as r:
-                data = json.loads(r.read())
-            if data.get("closed"):
+        for team, cid in ADVANCE_CONDITIONS.items():
+            try:
+                url = f"https://clob.polymarket.com/markets/{cid}"
+                req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _ur.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read())
+                if data.get("closed") or data.get("question", "") == "":
+                    # Market closed/resolved → treat as 0 (eliminated) or 1 (advanced)
+                    # We can't tell direction so skip; Elo + MC will handle it
+                    continue
+                tokens = data.get("tokens", [])
+                yes_price = next(
+                    (float(t["price"]) for t in tokens
+                     if t.get("outcome", "").lower() == "yes"),
+                    None,
+                )
+                if yes_price is not None:
+                    result[team] = yes_price
+            except Exception:
                 continue
-            tokens = data.get("tokens", [])
-            yes_price = next(
-                (float(t["price"]) for t in tokens if t.get("outcome", "").lower() == "yes"),
-                None,
-            )
-            if yes_price is not None:
-                result[team] = yes_price
     except Exception:
         pass
-    return result if result else None
+    return result
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_polymarket_tourney_win_probs() -> dict[str, float]:
+    """
+    Fetch tournament-win prices. Used purely as an elimination signal:
+    a team at <= ELIM_THRESHOLD (0.5%) is treated as functionally eliminated
+    and its Elo contribution to simulations is discounted to near-zero.
+    Returns {team: yes_price}. Missing teams are not in result.
+    """
+    import urllib.request as _ur
+    result: dict[str, float] = {}
+    try:
+        for team, cid in TOURNEY_WIN_CONDITIONS.items():
+            try:
+                url = f"https://clob.polymarket.com/markets/{cid}"
+                req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _ur.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read())
+                tokens = data.get("tokens", [])
+                yes_price = next(
+                    (float(t["price"]) for t in tokens
+                     if t.get("outcome", "").lower() == "yes"),
+                    None,
+                )
+                if yes_price is not None:
+                    result[team] = yes_price
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return result
+
+
+def get_eliminated_teams(use_markets: bool = True) -> set[str]:
+    """
+    Return set of teams the market considers functionally eliminated.
+    Criteria (either condition triggers elimination):
+      1. Tournament-win price <= ELIM_THRESHOLD (0.5%)
+      2. Advance-to-knockout price <= 0.02 (2%) — extreme long shot
+    Only applied when use_markets=True.
+    """
+    if not use_markets:
+        return set()
+    eliminated: set[str] = set()
+    win_probs = fetch_polymarket_tourney_win_probs()
+    adv_probs = fetch_polymarket_advance_probs()
+    for team, p in win_probs.items():
+        if p <= ELIM_THRESHOLD:
+            eliminated.add(team)
+    for team, p in adv_probs.items():
+        if p <= 0.02:
+            eliminated.add(team)
+    return eliminated
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def compute_market_third_place_probs() -> dict[str, dict] | None:
     """
-    Use Polymarket group-win prices + Elo weights to infer P(finish 3rd) for
-    every team in the five eligible groups (A/E/H/I/J) via Plackett-Luce
-    Monte Carlo simulation.
+    Infer P(finish 3rd AND advance as best 3rd) for every team in the
+    five eligible groups (A/E/H/I/J) using the advance-market decomposition:
 
-    Returns {team: {"group": str, "p_win": float, "p_3rd": float, "source": str}}
-    or None if Polymarket is unavailable.
+        P_3rd_qual(team) ≈ P_advance(team) - P_1st(team) - P_2nd(team)
+
+    Where P_1st and P_2nd come from a quick internal MC run (5k sims).
+    This is far more direct than the old Plackett-Luce group-win proxy:
+    Ecuador at 25.5% advance price bakes in the full path (finish 3rd AND
+    be one of the 8 best), exactly what we want.
+
+    Falls back to Elo-only Plackett-Luce if market data unavailable.
+
+    Returns {team: {"group": str, "p_advance": float, "p_3rd_qual": float,
+                    "p_1st": float, "p_2nd": float, "source": str}}
     """
-    mkt = fetch_polymarket_3rd_place_probs()  # {team: yes_price} for known teams
-    if not mkt:
-        return None
+    adv_probs = fetch_polymarket_advance_probs()  # {team: P(advance by any means)}
 
-    # Elo fallback weights for teams without Polymarket markets
-    ELO_FALLBACK = {
-        # Group A no-market teams
-        "Czechia": 1780, "South Africa": 1550,
-        # Group E no-market teams
-        "Ecuador": 1750, "Curaçao": 1380,
-        # Group H no-market teams
-        "Qatar": 1620, "Zambia": 1380,
-        # Group I no-market teams
-        "Saudi Arabia": 1650,
-        # Group J no-market teams
-        "Serbia": 1810,
-    }
-
-    def elo_weight(elo: int) -> float:
-        return 10 ** (elo / 400)
-
-    def plackett_luce(raw: dict[str, float | None], n: int = 100_000) -> dict[str, dict]:
-        """Simulate placements via Gumbel-max trick (fast vectorized PL)."""
-        teams = list(raw.keys())
-        # Fill missing with Elo-derived residual
-        known_sum = sum(v for v in raw.values() if v is not None)
-        residual  = max(0.02, 1.0 - known_sum)
-        unknowns  = [t for t in teams if raw[t] is None]
-        elo_w     = {t: elo_weight(ELO_FALLBACK.get(t, 1600)) for t in unknowns}
-        elo_total = sum(elo_w.values()) if elo_w else 1.0
-        strengths = {
-            t: raw[t] if raw[t] is not None else residual * elo_w[t] / elo_total
-            for t in teams
-        }
-        s_total = sum(strengths.values())
-        s = np.array([strengths[t] / s_total for t in teams])
-        log_s = np.log(s + 1e-12)
-        rng = np.random.default_rng(0)
-        batch = 1000
-        nt = len(teams)
-        counts = np.zeros((nt, nt), dtype=np.int64)
-        for _ in range(n // batch):
-            g = rng.gumbel(size=(batch, nt))
-            ranks = np.argsort(-(log_s + g), axis=1)
-            for place in range(nt):
-                np.add.at(counts[:, place], ranks[:, place], 1)
-        total = (n // batch) * batch
-        result = {}
-        for i, t in enumerate(teams):
-            result[t] = {
-                "p_win": counts[i, 0] / total,
-                "p_3rd": counts[i, 2] / total,
-                "source": "MKT" if raw[t] is not None else "ELO",
-            }
-        return result
+    # ── Quick internal MC to get P(1st) and P(2nd) per team (5k sims) ──────
+    # We need these to decompose P_advance into P_3rd_qual
+    n_quick = 5_000
+    p1_counts: dict[str, int] = {t: 0 for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]}
+    p2_counts: dict[str, int] = {t: 0 for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]}
+    base_tables = init_group_tables()
+    live_elos = compute_tournament_elos()
+    rng_state = np.random.get_state()
+    np.random.seed(42)
+    for _ in range(n_quick):
+        tables = {grp: {t: list(v) for t, v in grp_table.items()}
+                  for grp, grp_table in base_tables.items()
+                  if grp in THIRD_PLACE_GROUPS}
+        # Only simulate fixtures for THIRD_PLACE_GROUPS
+        for (grp, home, away) in ALL_FIXTURES:
+            if grp not in THIRD_PLACE_GROUPS:
+                continue
+            gh, ga = simulate_match(home, away, live_elos)
+            t = tables[grp]
+            t[home][1] += gh; t[home][2] += ga; t[home][3] += gh - ga
+            t[away][1] += ga; t[away][2] += gh; t[away][3] += ga - gh
+            if gh > ga:
+                t[home][0] += 3; t[home][4] += 1; t[away][6] += 1
+            elif ga > gh:
+                t[away][0] += 3; t[away][4] += 1; t[home][6] += 1
+            else:
+                t[home][0] += 1; t[home][5] += 1
+                t[away][0] += 1; t[away][5] += 1
+        for grp in THIRD_PLACE_GROUPS:
+            ranked = rank_group(tables[grp])
+            if ranked[0] in p1_counts: p1_counts[ranked[0]] += 1
+            if ranked[1] in p2_counts: p2_counts[ranked[1]] += 1
+    np.random.set_state(rng_state)
 
     output: dict[str, dict] = {}
     for grp in THIRD_PLACE_GROUPS:
-        raw: dict[str, float | None] = {t: mkt.get(t) for t in GROUPS[grp]}
-        placements = plackett_luce(raw)
-        for t, vals in placements.items():
-            output[t] = {"group": grp, **vals}
-
+        for team in GROUPS[grp]:
+            p_adv = adv_probs.get(team)  # None if no market
+            p1 = p1_counts.get(team, 0) / n_quick
+            p2 = p2_counts.get(team, 0) / n_quick
+            if p_adv is not None:
+                # Decompose: subtract P(1st) and P(2nd) to isolate 3rd-qual signal
+                p3q = max(0.0, p_adv - p1 - p2)
+                source = "MKT"
+            else:
+                # No market → use Elo-based residual (MC gives P(3rd) directly)
+                p3q = max(0.0, 1.0 - p1 - p2) * 0.4  # rough: ~40% of 3rd-place sims qualify
+                source = "ELO"
+            output[team] = {
+                "group": grp,
+                "p_advance": p_adv if p_adv is not None else (p1 + p2 + p3q),
+                "p_3rd_qual": p3q,
+                "p_1st": p1,
+                "p_2nd": p2,
+                "source": source,
+            }
     return output if output else None
+
+
+# ── Legacy stub kept for backward compat (no longer used in MC blend) ────────
+def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
+    """Deprecated: use fetch_polymarket_advance_probs() instead."""
+    return None
 
 
 def blend_mc_with_market(mc_prob: float, market_prob: float | None, market_weight: float = 0.4) -> tuple[float, str]:
@@ -1073,27 +1263,45 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
             if g_total > 0:
                 g_winner_prob = {t: p / g_total for t, p in g_winner_prob.items()}
 
-        # ── Third-place blend ─────────────────────────────────────────────────
-        mkt_3rd = fetch_polymarket_3rd_place_probs()
-        if mkt_3rd:
-            for team, mkt_p in mkt_3rd.items():
-                if team not in third_advance_prob:
-                    continue
-                # The market price here is P(win group), not P(finish 3rd).
-                # Blending it directly against third_advance_prob is only valid
-                # for genuine 3rd-place candidates (low group-win probability).
-                # Teams heavily favored to WIN their group (mkt_p > 0.50) should
-                # NOT have their 3rd-place advance prob pushed up by their high
-                # group-win price — skip the blend for them.
-                if mkt_p > 0.50:
-                    methods[team] = "MC"  # market signal irrelevant for 3rd place
-                    continue
-                # For genuine 3rd-place candidates, invert: higher group-win price
-                # means LESS likely to finish 3rd. Use (1 - mkt_p) as the signal.
-                third_signal = 1.0 - mkt_p
-                blended, method = blend_mc_with_market(third_advance_prob[team], third_signal)
-                third_advance_prob[team] = blended
-                methods[team] = method
+        # ── Third-place blend — advance-market decomposition ─────────────────
+        # Strategy: P_advance(team) = P_1st + P_2nd + P_3rd_qual
+        # The Polymarket advance market resolves YES for ANY path through
+        # (1st, 2nd, qualifying 3rd). So the advance price is the most direct
+        # signal available. We use it as the market input to blend_mc_with_market,
+        # which weights 60% MC / 40% market. This handles edge cases cleanly:
+        #   Ecuador 25.5% advance: MC third_advance_prob ~20% → blend ≈ 23%
+        #   Sweden 87.2% advance: NOT in THIRD_PLACE_GROUPS, so skipped here
+        #   Türkiye: advance market closed/resolved, no price → stays at MC=0
+        adv_probs = fetch_polymarket_advance_probs()  # {team: P(advance by any means)}
+        if adv_probs:
+            for grp in THIRD_PLACE_GROUPS:
+                for team in GROUPS[grp]:
+                    p_adv_mkt = adv_probs.get(team)
+                    if p_adv_mkt is None:
+                        methods.setdefault(team, "MC")
+                        continue
+                    mc_p3q = third_advance_prob.get(team, 0.0)
+                    # Blend MC third-place-advance prob with market advance price.
+                    # The market price is slightly higher than pure P_3rd_qual
+                    # (it includes P_1st + P_2nd), but for genuine 3rd-place
+                    # candidates those are near-zero, so the signal is accurate.
+                    # For teams likely to finish 1st/2nd, market price >> mc_p3q,
+                    # which would overstate their 3rd-place prob — so cap the
+                    # market signal at 2x the MC estimate.
+                    p_adv_capped = min(p_adv_mkt, max(mc_p3q * 2.0, 0.05))
+                    blended, method = blend_mc_with_market(mc_p3q, p_adv_capped)
+                    third_advance_prob[team] = blended
+                    methods[team] = method
+
+        # ── Elimination suppression ─────────────────────────────────────────
+        # Teams with tournament-win price ≤ 0.5% or advance price ≤ 2% are
+        # treated as functionally eliminated. Zero out their third_advance_prob
+        # so they can't appear as plausible Match 82 opponents.
+        eliminated = get_eliminated_teams(use_markets=True)
+        for team in eliminated:
+            if team in third_advance_prob:
+                third_advance_prob[team] = 0.0
+                methods[team] = "ELIM"
 
         # ── Propagate blended Group G probs into match82_joint_prob ──────────
         # The joint counts were built from raw MC; re-weight by blended g_winner_prob
@@ -1372,7 +1580,8 @@ def generate_path_to_seattle(target_team: str, mc: dict) -> dict:
         method = mc["methods"].get(target_team, "MC")
         probability = win_p
         
-        method_label = f'<span class="method-pill method-{"mkt" if method=="MKT" else ("blend" if method=="BLEND" else "mc")}">{method}</span>'
+        _pill_cls = {"MKT": "mkt", "BLEND": "blend", "ELIM": "elim"}.get(method, "mc")
+        method_label = f'<span class="method-pill method-{_pill_cls}">{method}</span>'
         
         steps.append(
             f"<b>{FLAG_MAP.get(target_team,'🏳️')} {target_team}</b> must <b>finish 1st in Group G</b>. "
@@ -1540,15 +1749,21 @@ def render_sidebar() -> tuple[str, int, bool]:
             for t in key_teams
         ]
         # Sort by absolute shift descending, show top 12
+        # Mark eliminated teams from market signal
+        _elim_set = get_eliminated_teams(use_markets=True) if True else set()
         shifts.sort(key=lambda x: -abs(x[2]))
         for team, new_elo, delta in shifts[:12]:
             arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "—")
             color = "#22c55e" if delta > 0 else ("#ef4444" if delta < 0 else "#94a3b8")
             flag  = FLAG_MAP.get(team, "🏳️")
+            elim_badge = (' <span style="font-size:0.65rem;color:#f87171;'
+                          'background:#2d0f0f;border:1px solid #6e1e1e;'
+                          'border-radius:3px;padding:0px 4px;">ELIM</span>'
+                          if team in _elim_set else "")
             st.markdown(
                 f'<div style="display:flex;justify-content:space-between;'
-                f'font-size:0.78rem;padding:2px 0;">'
-                f'<span>{flag} {team}</span>'
+                f'align-items:center;font-size:0.78rem;padding:2px 0;">'
+                f'<span>{flag} {team}{elim_badge}</span>'
                 f'<span style="color:{color};font-weight:600;">{arrow} {abs(delta):.0f}</span>'
                 f'</div>',
                 unsafe_allow_html=True,
