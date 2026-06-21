@@ -181,6 +181,94 @@ ELO: dict[str, float] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TOURNAMENT ELO UPDATER
+# Applies every played WC 2026 result to the base ELO ratings using the
+# standard Elo update formula with K=60 (FIFA World Cup weight).
+# This means Turkey (0W-0D-2L) falls ~80 pts; Norway (2W) rises ~80 pts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# All completed WC 2026 group-stage results (home, away, goals_home, goals_away)
+# Update this list daily as matches finish.
+PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
+    # Matchday 1 — June 11–16
+    ("Mexico",       "South Africa",  2, 0),
+    ("South Korea",  "Czechia",       2, 1),
+    ("Canada",       "Bosnia",        1, 1),
+    ("Qatar",        "Switzerland",   1, 1),
+    ("USA",          "Paraguay",      4, 1),
+    ("Australia",    "Türkiye",       2, 0),
+    ("Scotland",     "Haiti",         1, 0),
+    ("Brazil",       "Morocco",       1, 1),
+    ("Germany",      "Curaçao",       7, 1),
+    ("Côte d'Ivoire","Ecuador",       1, 0),
+    ("Netherlands",  "Japan",         2, 2),
+    ("Sweden",       "Tunisia",       5, 1),
+    ("Belgium",      "Egypt",         1, 1),
+    ("Iran",         "New Zealand",   2, 2),
+    ("Spain",        "Cabo Verde",    0, 0),
+    ("Saudi Arabia", "Uruguay",       1, 1),
+    ("France",       "Senegal",       3, 1),
+    ("Norway",       "Iraq",          4, 1),
+    ("Argentina",    "Algeria",       3, 0),
+    ("Austria",      "Jordan",        3, 1),
+    ("Portugal",     "DR Congo",      1, 1),
+    ("Colombia",     "Uzbekistan",    3, 1),
+    ("England",      "Croatia",       4, 2),
+    ("Ghana",        "Panama",        1, 0),
+    # Matchday 2 — June 18–21
+    ("Czechia",      "South Africa",  1, 1),
+    ("Switzerland",  "Bosnia",        4, 1),
+    ("Canada",       "Qatar",         6, 0),
+    ("Mexico",       "South Korea",   1, 0),
+    ("USA",          "Australia",     2, 0),
+    ("Scotland",     "Morocco",       0, 1),
+    ("Brazil",       "Haiti",         3, 0),
+    ("Türkiye",      "Paraguay",      0, 1),
+    ("Netherlands",  "Sweden",        5, 1),
+    ("Germany",      "Côte d'Ivoire", 2, 1),
+    ("Ecuador",      "Curaçao",       0, 0),
+    ("Tunisia",      "Japan",         0, 4),
+    # Matchday 2 — June 21 (afternoon/evening PT — add as results come in)
+    # ("Spain",      "Saudi Arabia",  X, X),
+    # ("Belgium",    "Iran",          X, X),
+    # ("Uruguay",    "Cabo Verde",    X, X),
+    # ("New Zealand","Egypt",         X, X),
+]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_tournament_elos() -> dict[str, float]:
+    """
+    Apply all completed WC 2026 results to base ELO ratings.
+
+    Uses standard Elo update formula:
+        new_elo = old_elo + K * (actual - expected)
+
+    where:
+        K = 60  (FIFA World Cup weight, per eloratings.net)
+        actual = 1.0 (win), 0.5 (draw), 0.0 (loss)
+        expected = 1 / (1 + 10^(-diff/400))  for the home team
+
+    Results are applied in chronological order so each match uses
+    the rating at that point in the tournament.
+
+    Returns a new dict with updated ratings — base ELO is never mutated.
+    """
+    K = 60.0
+    ratings = dict(ELO)  # copy — never mutate the base dict
+    for home, away, gh, ga in PLAYED_RESULTS:
+        r_h = ratings.get(home, 1700.0)
+        r_a = ratings.get(away, 1700.0)
+        expected_h = 1.0 / (1.0 + 10.0 ** ((r_a - r_h) / 400.0))
+        expected_a = 1.0 - expected_h
+        actual_h = 1.0 if gh > ga else (0.5 if gh == ga else 0.0)
+        actual_a = 1.0 - actual_h
+        ratings[home] = r_h + K * (actual_h - expected_h)
+        ratings[away]  = r_a + K * (actual_a - expected_a)
+    return ratings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CURRENT LIVE STANDINGS  (update as matches complete)
 # Format: {team: {"mp":int, "w":int, "d":int, "l":int, "gf":int, "ga":int}}
 # The simulator picks up from here and only plays REMAINING fixtures.
@@ -277,52 +365,52 @@ def fetch_standings_from_api() -> dict[str, dict] | None:
 
 # ── Hardcoded fallback standings (updated manually if no Sheet is configured) ─
 LIVE_STANDINGS: dict[str, dict] = {
-    # Group A — 1 match played each (Mexico 2-0 South Africa; South Korea 2-1 Czechia)
-    "Mexico":       {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":0},
-    "South Korea":  {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":1},
-    "Czechia":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":2},
-    "South Africa": {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":2},
-    # Group B — opening matches: Switzerland 1-1 Canada; Qatar 1-1 Bosnia
-    "Switzerland":  {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Canada":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Qatar":        {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Bosnia":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    # Group C — Scotland 1-0 Haiti; Brazil 1-1 Morocco
-    "Scotland":     {"mp":1,"w":1,"d":0,"l":0,"gf":1,"ga":0},
-    "Morocco":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Brazil":       {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Haiti":        {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
-    # Group D — USA 4-1 Paraguay; Australia 2-0 Türkiye
-    "USA":          {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
-    "Australia":    {"mp":1,"w":1,"d":0,"l":0,"gf":2,"ga":0},
-    "Türkiye":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":2},
-    "Paraguay":     {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
-    # Group E — Germany 7-1 Curaçao; Côte d'Ivoire 1-0 Ecuador
-    "Germany":      {"mp":1,"w":1,"d":0,"l":0,"gf":7,"ga":1},
-    "Côte d'Ivoire":{"mp":1,"w":1,"d":0,"l":0,"gf":1,"ga":0},
-    "Ecuador":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":1},
-    "Curaçao":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":7},
-    # Group F — Sweden 5-1 Tunisia; Netherlands 2-2 Japan
-    "Sweden":       {"mp":1,"w":1,"d":0,"l":0,"gf":5,"ga":1},
-    "Japan":        {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
-    "Netherlands":  {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
-    "Tunisia":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":5},
-    # Group G — Belgium 1-1 Egypt; Iran 2-2 New Zealand
+    # Group A — MD1: Mexico 2-0 RSA, SKor 2-1 CZE | MD2: CZE 1-1 RSA, Mexico 1-0 SKor
+    "Mexico":       {"mp":2,"w":2,"d":0,"l":0,"gf":3,"ga":0},
+    "South Korea":  {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
+    "Czechia":      {"mp":2,"w":0,"d":1,"l":1,"gf":2,"ga":3},
+    "South Africa": {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":3},
+    # Group B — MD1: Can 1-1 Bos, Qat 1-1 Swi | MD2: Swi 4-1 Bos, Can 6-0 Qat
+    "Switzerland":  {"mp":2,"w":1,"d":1,"l":0,"gf":5,"ga":2},
+    "Canada":       {"mp":2,"w":1,"d":1,"l":0,"gf":7,"ga":1},
+    "Qatar":        {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":7},
+    "Bosnia":       {"mp":2,"w":0,"d":1,"l":1,"gf":2,"ga":5},
+    # Group C — MD1: Sco 1-0 Hai, Bra 1-1 Mor | MD2: Mor 1-0 Sco, Bra 3-0 Hai
+    "Scotland":     {"mp":2,"w":1,"d":0,"l":1,"gf":1,"ga":1},
+    "Morocco":      {"mp":2,"w":1,"d":1,"l":0,"gf":2,"ga":1},
+    "Brazil":       {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":1},
+    "Haiti":        {"mp":2,"w":0,"d":0,"l":2,"gf":0,"ga":4},
+    # Group D — MD1: USA 4-1 Par, Aus 2-0 Tur | MD2: USA 2-0 Aus, Par 1-0 Tur
+    "USA":          {"mp":2,"w":2,"d":0,"l":0,"gf":6,"ga":1},
+    "Australia":    {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
+    "Türkiye":      {"mp":2,"w":0,"d":0,"l":2,"gf":0,"ga":3},
+    "Paraguay":     {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":4},
+    # Group E — MD1: Ger 7-1 Cur, CIV 1-0 Ecu | MD2: Ger 2-1 CIV, Ecu 0-0 Cur
+    "Germany":      {"mp":2,"w":2,"d":0,"l":0,"gf":9,"ga":2},
+    "Côte d'Ivoire":{"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
+    "Ecuador":      {"mp":2,"w":0,"d":1,"l":1,"gf":0,"ga":1},
+    "Curaçao":      {"mp":2,"w":0,"d":1,"l":1,"gf":2,"ga":8},
+    # Group F — MD1: Ned 2-2 Jpn, Swe 5-1 Tun | MD2: Ned 5-1 Swe, Jpn 4-0 Tun
+    "Netherlands":  {"mp":2,"w":1,"d":1,"l":0,"gf":7,"ga":3},
+    "Japan":        {"mp":2,"w":1,"d":1,"l":0,"gf":6,"ga":2},
+    "Sweden":       {"mp":2,"w":1,"d":0,"l":1,"gf":6,"ga":6},
+    "Tunisia":      {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":9},
+    # Group G — MD1: Bel 1-1 Egy, Iran 2-2 NZL (MD2 in progress June 21)
     "Belgium":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
     "Egypt":        {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
     "Iran":         {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
     "New Zealand":  {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
-    # Group H — Spain 0-0 Cabo Verde; Saudi Arabia 1-1 Uruguay
+    # Group H — MD1: Esp 0-0 CPV, KSA 1-1 Uru (MD2 in progress June 21)
     "Spain":        {"mp":1,"w":0,"d":1,"l":0,"gf":0,"ga":0},
     "Cabo Verde":   {"mp":1,"w":0,"d":1,"l":0,"gf":0,"ga":0},
     "Saudi Arabia": {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
     "Uruguay":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    # Group I — France 3-1 Senegal; Norway 4-1 Iraq
+    # Group I — MD1: Fra 3-1 Sen, Nor 4-1 Iraq (MD2 June 22)
     "France":       {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
     "Norway":       {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
     "Senegal":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":3},
     "Iraq":         {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
-    # Group J — Argentina 3-0 Algeria; Austria 3-1 Jordan
+    # Group J — MD1: Arg 3-0 Alg, Aut 3-1 Jor (MD2 June 22)
     "Argentina":    {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":0},
     "Austria":      {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
     "Jordan":       {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":3},
@@ -594,10 +682,19 @@ def simulate_scoreline(lam_h: float, lam_a: float, max_goals: int = 8) -> tuple[
             return int(gh), int(ga)
 
 
-def simulate_match(team_a: str, team_b: str) -> tuple[int, int]:
-    """Simulate a single match, returning (goals_a, goals_b)."""
-    elo_a = ELO.get(team_a, 1700)
-    elo_b = ELO.get(team_b, 1700)
+def simulate_match(
+    team_a: str,
+    team_b: str,
+    elo_ratings: dict[str, float] | None = None,
+) -> tuple[int, int]:
+    """Simulate a single match, returning (goals_a, goals_b).
+
+    elo_ratings: pass compute_tournament_elos() to use tournament-updated
+    ratings; falls back to the base ELO dict if None.
+    """
+    ratings = elo_ratings or ELO
+    elo_a = ratings.get(team_a, ELO.get(team_a, 1700))
+    elo_b = ratings.get(team_b, ELO.get(team_b, 1700))
     lam_a, lam_b = expected_goals(elo_a, elo_b)
     return simulate_scoreline(lam_a, lam_b)
 
@@ -623,15 +720,16 @@ def init_group_tables() -> dict[str, dict[str, list]]:
     return tables
 
 
-def simulate_group_stage(tables: dict) -> dict:
+def simulate_group_stage(tables: dict, elo_ratings: dict[str, float] | None = None) -> dict:
     """
     Simulate all remaining fixtures and return final standings.
     Mutates a *copy* of tables.
-    
+
+    elo_ratings: tournament-updated Elo dict from compute_tournament_elos().
     Returns: {group: {team: [pts, gf, ga, gd, w, d, l]}}
     """
     for (grp, home, away) in ALL_FIXTURES:
-        gh, ga = simulate_match(home, away)
+        gh, ga = simulate_match(home, away, elo_ratings)
         t = tables[grp]
         # Home team
         t[home][1] += gh; t[home][2] += ga; t[home][3] += gh - ga
@@ -901,14 +999,16 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
     match82_counts    = {}  # (g_winner, third_team): count
     
     base_tables = init_group_tables()
-    
+    # Compute tournament-updated Elo ratings once for the whole MC run
+    live_elos = compute_tournament_elos()
+
     for _ in range(n_sims):
         # Deep copy standings for this simulation
         tables = {grp: {t: list(v) for t, v in grp_table.items()}
                   for grp, grp_table in base_tables.items()}
-        
-        # Simulate all remaining fixtures
-        simulate_group_stage(tables)
+
+        # Simulate remaining fixtures with tournament-adjusted Elos
+        simulate_group_stage(tables, live_elos)
         
         # Rank each group
         ranked = {grp: rank_group(tables[grp]) for grp in ALL_GROUPS}
@@ -1420,10 +1520,39 @@ def render_sidebar() -> tuple[str, int, bool]:
         
         st.divider()
         st.markdown("### ℹ️ Model Notes")
-        st.caption("**Engine**: Dixon-Coles corrected Poisson + Elo ratings")
+        st.caption("**Engine**: Dixon-Coles corrected Poisson + Dynamic Elo")
         st.caption("**3rd-place**: Full 12-group race, not independent per-team probs")
-        st.caption("**Elo source**: eloratings.net as of June 13, 2026")
+        st.caption("**Elo base**: eloratings.net as of June 13, 2026")
+        st.caption("**Elo updates**: K=60 applied after every WC result")
         st.caption("**Blend**: Polymarket API (no key required, free)")
+
+        st.divider()
+        st.markdown("### 📊 Elo Shifts")
+        st.caption("Change from base rating after WC results")
+        live_elos_sidebar = compute_tournament_elos()
+        # Show all Group G teams + top movers from other groups
+        key_teams = list(GROUPS["G"]) + [
+            t for grp in THIRD_PLACE_GROUPS for t in GROUPS[grp]
+        ]
+        shifts = [
+            (t, live_elos_sidebar.get(t, ELO.get(t, 1700)),
+             live_elos_sidebar.get(t, ELO.get(t, 1700)) - ELO.get(t, 1700))
+            for t in key_teams
+        ]
+        # Sort by absolute shift descending, show top 12
+        shifts.sort(key=lambda x: -abs(x[2]))
+        for team, new_elo, delta in shifts[:12]:
+            arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "—")
+            color = "#22c55e" if delta > 0 else ("#ef4444" if delta < 0 else "#94a3b8")
+            flag  = FLAG_MAP.get(team, "🏳️")
+            st.markdown(
+                f'<div style="display:flex;justify-content:space-between;'
+                f'font-size:0.78rem;padding:2px 0;">'
+                f'<span>{flag} {team}</span>'
+                f'<span style="color:{color};font-weight:600;">{arrow} {abs(delta):.0f}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
         # Show snapshot status
         snap = load_precomputed_results()
