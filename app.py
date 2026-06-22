@@ -228,11 +228,11 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("Germany",      "Côte d'Ivoire", 2, 1),
     ("Ecuador",      "Curaçao",       0, 0),
     ("Tunisia",      "Japan",         0, 4),
-    # Matchday 2 — June 21 (afternoon/evening PT — add as results come in)
-    # ("Spain",      "Saudi Arabia",  X, X),
-    # ("Belgium",    "Iran",          X, X),
-    # ("Uruguay",    "Cabo Verde",    X, X),
-    # ("New Zealand","Egypt",         X, X),
+    # Matchday 2 — June 21 (FINAL)
+    ("Belgium",     "Iran",          0, 0),   # BEL 0-0 IRA  (De Bruyne stumbles)
+    ("New Zealand", "Egypt",         1, 3),   # NZL 1-3 EGY  (Egypt top of Group G)
+    ("Spain",       "Saudi Arabia",  4, 0),   # ESP 4-0 KSA  (Yamal's 1st WC goal)
+    ("Uruguay",     "Cabo Verde",    2, 2),   # URU 2-2 CPV  (Cape Verde's 1st WC goals)
 ]
 
 
@@ -404,16 +404,18 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Japan":        {"mp":2,"w":1,"d":1,"l":0,"gf":6,"ga":2},
     "Sweden":       {"mp":2,"w":1,"d":0,"l":1,"gf":6,"ga":6},
     "Tunisia":      {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":9},
-    # Group G — MD1: Bel 1-1 Egy, Iran 2-2 NZL (MD2 in progress June 21)
-    "Belgium":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Egypt":        {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Iran":         {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
-    "New Zealand":  {"mp":1,"w":0,"d":1,"l":0,"gf":2,"ga":2},
-    # Group H — MD1: Esp 0-0 CPV, KSA 1-1 Uru (MD2 in progress June 21)
-    "Spain":        {"mp":1,"w":0,"d":1,"l":0,"gf":0,"ga":0},
-    "Cabo Verde":   {"mp":1,"w":0,"d":1,"l":0,"gf":0,"ga":0},
-    "Saudi Arabia": {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
-    "Uruguay":      {"mp":1,"w":0,"d":1,"l":0,"gf":1,"ga":1},
+    # Group G — through MD2 (June 21 FINAL)
+    # Egypt: 3pts (+2 GD), Belgium: 2pts (0 GD), Iran: 2pts (0 GD), NZL: 0pts (-1 GD)
+    "Egypt":        {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":2},
+    "Belgium":      {"mp":2,"w":0,"d":2,"l":0,"gf":1,"ga":1},
+    "Iran":         {"mp":2,"w":0,"d":2,"l":0,"gf":2,"ga":2},
+    "New Zealand":  {"mp":2,"w":0,"d":1,"l":1,"gf":3,"ga":4},
+    # Group H — through MD2 (June 21 FINAL)
+    # Spain: 4pts (+4 GD), Uruguay: 2pts (0 GD), Cabo Verde: 2pts (0 GD), KSA: 1pt (-4 GD)
+    "Spain":        {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":0},
+    "Uruguay":      {"mp":2,"w":0,"d":2,"l":0,"gf":3,"ga":3},
+    "Cabo Verde":   {"mp":2,"w":0,"d":2,"l":0,"gf":2,"ga":2},
+    "Saudi Arabia": {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":5},
     # Group I — MD1: Fra 3-1 Sen, Nor 4-1 Iraq (MD2 June 22)
     "France":       {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
     "Norway":       {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
