@@ -2753,14 +2753,14 @@ def main() -> None:
                 grp_teams = [
                     (t, mkt_3rd[t]) for t in GROUPS[grp] if t in mkt_3rd
                 ]
-                grp_teams.sort(key=lambda x: -x[1]["p_3rd"])
+                grp_teams.sort(key=lambda x: -x[1]["p_3rd_qual"])
                 rows = []
                 for t, d in grp_teams:
                     rows.append({
                         "Team": f"{FLAG_MAP.get(t,'🏳️')} {t}",
                         "Source": d["source"],
-                        "P(Win Group) %": round(d["p_win"] * 100, 1),
-                        "P(Finish 3rd) %": round(d["p_3rd"] * 100, 1),
+                        "P(Win Group) %": round(d["p_1st"] * 100, 1),
+                        "P(Finish 3rd) %": round(d["p_3rd_qual"] * 100, 1),
                     })
                 df_grp = pd.DataFrame(rows)
                 st.dataframe(
@@ -2791,8 +2791,8 @@ def main() -> None:
                 "Team": f"{FLAG_MAP.get(t,'🏳️')} {t}",
                 "Group": d["group"],
                 "Source": d["source"],
-                "P(Win Group) %": round(d["p_win"] * 100, 1),
-                "P(Finish 3rd) %": round(d["p_3rd"] * 100, 1),
+                "P(Win Group) %": round(d["p_1st"] * 100, 1),
+                "P(Finish 3rd) %": round(d["p_3rd_qual"] * 100, 1),
             })
         all_rows.sort(key=lambda x: -x["P(Finish 3rd) %"])
         df_all = pd.DataFrame(all_rows)
