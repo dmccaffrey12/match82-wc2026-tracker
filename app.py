@@ -1463,7 +1463,7 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
 
         # ── Propagate blended Group G probs into match82_joint_prob ──────────
         # The joint counts were built from raw MC; re-weight by blended g_winner_prob
-        if mkt_g:
+        if adv_probs_g:
             # Compute original MC g_winner_prob for rescaling
             mc_g_total = sum(g_winner_counts.values())
             mc_g_prob_raw = {t: c / mc_g_total for t, c in g_winner_counts.items()} if mc_g_total else {}
