@@ -1239,6 +1239,66 @@ def blend_mc_with_market(
 # MONTE CARLO ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def compute_locked_outcomes() -> dict[str, dict[str, str]]:
+    """
+    Derive mathematically-locked group outcomes from current standings.
+    After enough games have been played, some positions are already decided
+    regardless of remaining results. We hard-clamp these in the MC so we
+    don't waste simulations on impossible scenarios.
+
+    Returns: {group: {"winner": team, "eliminated": [team, ...], ...}}
+    Only includes groups/outcomes where something is truly decided.
+
+    Rules used:
+      - THROUGH (1st or 2nd guaranteed): max possible points for any rival
+        cannot exceed this team's current points.
+      - ELIMINATED (cannot finish top-2): even with max points from remaining
+        games, team cannot reach the points of the 2nd-place team.
+      - GROUP_WINNER: team already guaranteed 1st regardless of MD3.
+    """
+    live = fetch_standings_from_api() or LIVE_STANDINGS
+    remaining_games: dict[str, int] = {}  # group -> remaining fixtures count
+    for grp in ALL_GROUPS:
+        played = sum(live.get(t, {}).get("mp", 0) for t in GROUPS[grp]) // 2
+        remaining_games[grp] = 6 - played
+
+    locked: dict[str, dict] = {}
+    for grp in ALL_GROUPS:
+        teams = GROUPS[grp]
+        rem = remaining_games[grp]
+        group_locked: dict = {"eliminated": [], "through": [], "winner": None}
+
+        # Each team can earn at most 3 * remaining_games_for_that_team more pts
+        # In a 4-team group with N games remaining, each team plays at most
+        # ceil(N * 2/4) ≈ N/2 more games. Easier: track per-team remaining mp.
+        team_mp   = {t: live.get(t, {}).get("mp", 0) for t in teams}
+        team_pts  = {t: live.get(t, {}).get("w", 0) * 3 + live.get(t, {}).get("d", 0)
+                     for t in teams}
+        team_rem  = {t: 3 - team_mp[t] for t in teams}  # 3 games per team total
+        team_max  = {t: team_pts[t] + 3 * team_rem[t] for t in teams}
+
+        pts_sorted = sorted(team_pts.values(), reverse=True)
+
+        for team in teams:
+            # Eliminated: max possible pts < current 2nd-place pts
+            # (can't reach top-2 even with perfect remaining record)
+            if team_max[team] < pts_sorted[1]:
+                group_locked["eliminated"].append(team)
+            # Through: current pts > max possible for any team currently below 2nd
+            # i.e., this team is guaranteed to finish top-2
+            others_max = sorted([team_max[t] for t in teams if t != team], reverse=True)
+            if team_pts[team] > others_max[1]:  # strictly better than 3rd-best-case
+                group_locked["through"].append(team)
+            # Group winner: current pts > max possible for every other team
+            if all(team_pts[team] > team_max[t] for t in teams if t != team):
+                group_locked["winner"] = team
+
+        if any(group_locked[k] for k in group_locked):
+            locked[grp] = group_locked
+
+    return locked
+
+
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
 def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> dict:
     """
@@ -1246,9 +1306,10 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
     
     For each simulation:
       1. Simulate all remaining fixtures using Dixon-Coles Poisson
-      2. Rank each group
+      2. Rank each group — applying locked outcomes as hard constraints
       3. Collect all 12 third-place teams
-      4. Rank the 12 third-place teams globally (pts → gd → gf → random)
+      4. Rank the 12 third-place teams globally via full FIFA tiebreaker
+         (pts → GD → GF → random) across ALL 12 simultaneously
       5. Top 8 advance; record which 3rd-place team faces Group G winner
     
     Returns a dict of frequency-based probabilities.
@@ -1264,6 +1325,8 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
     base_tables = init_group_tables()
     # Compute tournament-updated Elo ratings once for the whole MC run
     live_elos = compute_tournament_elos()
+    # Compute mathematically locked outcomes once (doesn't change during a run)
+    locked = compute_locked_outcomes()
 
     for _ in range(n_sims):
         # Deep copy standings for this simulation
@@ -1275,6 +1338,26 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
         
         # Rank each group
         ranked = {grp: rank_group(tables[grp]) for grp in ALL_GROUPS}
+
+        # ── Apply locked outcomes as hard constraints ──────────────────────────
+        # If a team is mathematically eliminated, force them to 3rd/4th.
+        # If a team has clinched 1st, force them to the top slot.
+        for grp, grp_lock in locked.items():
+            r = ranked[grp]
+            # Force confirmed winner to position 0
+            winner = grp_lock.get("winner")
+            if winner and r[0] != winner:
+                r.remove(winner)
+                r.insert(0, winner)
+            # Force eliminated teams out of top-2
+            for elim in grp_lock.get("eliminated", []):
+                if elim in r[:2]:
+                    idx = r.index(elim)
+                    # Swap with the highest-ranked non-locked team outside top-2
+                    for swap_idx in range(2, len(r)):
+                        if r[swap_idx] not in grp_lock.get("eliminated", []):
+                            r[idx], r[swap_idx] = r[swap_idx], r[idx]
+                            break
         
         # Record Group G outcomes
         g_winner   = ranked["G"][0]
@@ -1282,22 +1365,23 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
         g_winner_counts[g_winner]     += 1
         g_runnerup_counts[g_runnerup] += 1
         
-        # Collect all 12 third-place teams and their records
+        # ── Full FIFA cross-group 3rd-place ranking ────────────────────────────
+        # Collect ALL 12 third-place teams with their full tiebreaker record.
+        # FIFA ranks them simultaneously: pts → GD → GF → fair play → FIFA rank.
+        # We approximate fair play / FIFA rank with a random tiebreak (rare).
         third_place_teams = []
         for grp in ALL_GROUPS:
             third_team = ranked[grp][2]
-            rec = get_third_place_record(tables[grp], third_team)
+            s = tables[grp][third_team]
+            # Full record: [pts, gd, gf, random_noise]
+            rec = (s[0], s[3], s[1], np.random.random())
             third_place_teams.append((third_team, grp, rec))
         
-        # Rank 3rd-place teams globally: pts desc, gd desc, gf desc, random tiebreak
-        third_place_teams.sort(
-            key=lambda x: (x[2][0], x[2][1], x[2][2], np.random.random()),
-            reverse=True
-        )
+        # Sort all 12 simultaneously — this IS the FIFA rule
+        third_place_teams.sort(key=lambda x: x[2], reverse=True)
         
-        # Top 8 advance
+        # Top 8 advance to Round of 32
         advancing_thirds = third_place_teams[:8]
-        advancing_third_teams = {t for t, _, _ in advancing_thirds}
         
         for t, _, _ in advancing_thirds:
             third_advance_counts[t] += 1
@@ -1307,9 +1391,6 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
                               if grp in THIRD_PLACE_GROUPS]
         
         # Match 82: Group G winner vs. the eligible 3rd-place qualifier
-        # (FIFA bracket assigns the 3rd-place team to Match 82 based on which
-        # eligible groups produce the qualifying 3rd-place teams — but for
-        # probability purposes we track each possible pairing)
         for third_team, _ in eligible_advancing:
             key = (g_winner, third_team)
             match82_counts[key] = match82_counts.get(key, 0) + 1
@@ -1324,14 +1405,15 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
     methods = {}
     if use_markets:
         # ── Group G blend ────────────────────────────────────────────────────
-        mkt_g = fetch_polymarket_group_g_probs()  # Already normalized to 1.0
-        if mkt_g:
+        # Advance market replaces old group-winner CLOB IDs (retired)
+        adv_probs_g = fetch_polymarket_advance_probs()
+        if adv_probs_g:
             for team in GROUPS["G"]:
-                mkt_p = mkt_g.get(team)
+                mkt_p = adv_probs_g.get(team)
                 blended, method = blend_mc_with_market(g_winner_prob[team], mkt_p, group="G")
                 g_winner_prob[team] = blended
                 methods[team] = method
-            # Re-normalize Group G winner probs after blend
+            # Re-normalize so Group G winner probs sum to 1
             g_total = sum(g_winner_prob[t] for t in GROUPS["G"])
             if g_total > 0:
                 g_winner_prob = {t: p / g_total for t, p in g_winner_prob.items()}
@@ -1492,54 +1574,109 @@ def build_chaos_gauge(chaos_index: float) -> go.Figure:
 
 def build_heatmap(mc: dict) -> go.Figure:
     """
-    Joint probability heatmap sourced directly from MC simulation counts.
-    Each cell = P(G winner = X AND 3rd place qualifier from Group Y).
+    Joint probability heatmap: Group G winner (rows) x 3rd-place team (columns).
+    Each cell = P(G winner = X AND 3rd place qualifier = Y) from MC counts.
+    Shows team-level matchups (not group aggregates) so every cell is a specific
+    Match 82 scenario.
     """
-    g_teams = GROUPS["G"]
-    
-    # Aggregate joint probs by (g_winner, 3rd_group)
-    matrix_data = {}
+    g_teams = sorted(GROUPS["G"],
+                     key=lambda t: mc["g_winner_prob"].get(t, 0), reverse=True)
+
+    # Build list of 3rd-place teams that appear in any joint prob cell,
+    # sorted by their total advance probability (most likely first)
+    tp_teams_raw: dict[str, float] = {}
     for (gw, tp), prob in mc["match82_joint_prob"].items():
-        # Find which group tp belongs to
-        tp_group = None
-        for grp, members in GROUPS.items():
-            if tp in members:
-                tp_group = grp
-                break
-        if tp_group and tp_group in THIRD_PLACE_GROUPS:
-            key = (gw, tp_group)
-            matrix_data[key] = matrix_data.get(key, 0) + prob
-    
-    z = np.zeros((len(g_teams), len(THIRD_PLACE_GROUPS)))
-    for i, gw in enumerate(g_teams):
-        for j, grp in enumerate(THIRD_PLACE_GROUPS):
-            z[i, j] = matrix_data.get((gw, grp), 0) * 100
+        tp_grp = next((g for g, ms in GROUPS.items() if tp in ms), None)
+        if tp_grp in THIRD_PLACE_GROUPS:
+            tp_teams_raw[tp] = tp_teams_raw.get(tp, 0) + prob
+    # Show top 10 3rd-place candidates to keep the chart readable
+    tp_teams = sorted(tp_teams_raw, key=tp_teams_raw.get, reverse=True)[:10]
+
+    z = []
+    text = []
+    for gw in g_teams:
+        row_z, row_t = [], []
+        for tp in tp_teams:
+            p = mc["match82_joint_prob"].get((gw, tp), 0) * 100
+            row_z.append(p)
+            row_t.append(f"{p:.1f}%" if p >= 0.1 else "—")
+        z.append(row_z)
+        text.append(row_t)
 
     y_labels = [f"{FLAG_MAP.get(t,'🏳️')} {t}" for t in g_teams]
-    x_labels = [f"Grp {g}" for g in THIRD_PLACE_GROUPS]
+    x_labels = [f"{FLAG_MAP.get(t,'🏳️')} {t}" for t in tp_teams]
 
     fig = go.Figure(go.Heatmap(
         z=z, x=x_labels, y=y_labels,
-        text=[[f"{v:.1f}%" for v in row] for row in z],
+        text=text,
         texttemplate="%{text}",
-        textfont=dict(size=12, family="JetBrains Mono, monospace"),
-        colorscale=[[0,"#050d1a"],[0.15,"#0c2040"],[0.4,"#1d4ed8"],[0.7,"#0ea5e9"],[1.0,"#38bdf8"]],
+        textfont=dict(size=11, family="JetBrains Mono, monospace"),
+        colorscale=[[0,"#050d1a"],[0.1,"#0c2040"],[0.35,"#1d4ed8"],[0.65,"#0ea5e9"],[1.0,"#38bdf8"]],
         showscale=True,
         colorbar=dict(
-            title=dict(text="Joint Prob %", side="right", font=dict(color="#64748b",size=10)),
+            title=dict(text="Match 82 P%", side="right", font=dict(color="#64748b",size=10)),
             tickfont=dict(color="#64748b",size=10),bgcolor="#0d1020",
             bordercolor="#1e2235",borderwidth=1,thickness=14,len=0.8,
         ),
-        hovertemplate="<b>%{y}</b> wins Group G<br><b>%{x}</b> 3rd place advances<br>Joint probability: <b>%{text}</b><extra></extra>",
+        hovertemplate=(
+            "<b>%{y}</b> wins Group G<br>"
+            "<b>%{x}</b> advances as 3rd place<br>"
+            "Match 82 probability: <b>%{text}</b><extra></extra>"
+        ),
     ))
     fig.update_layout(
-        **_dark(height=320),
-        title=dict(text=f"MC Joint Probability Matrix — {mc['n_sims']:,} simulations", font=dict(size=12,color="#94a3b8"), x=0),
-        xaxis=dict(**AXIS_STYLE, title="3rd-Place Qualifying Group"),
+        **_dark(height=max(280, 90 * len(g_teams))),
+        title=dict(
+            text=f"Match 82 Scenario Matrix — {mc['n_sims']:,} simulations",
+            font=dict(size=12, color="#94a3b8"), x=0
+        ),
+        xaxis=dict(**AXIS_STYLE, title="3rd-Place Qualifier (top 10 candidates)",
+                   tickangle=-30),
         yaxis=dict(**AXIS_STYLE, title="Group G Winner", autorange="reversed"),
-        margin=dict(l=120,r=40,t=50,b=50),
+        margin=dict(l=140, r=40, t=50, b=100),
     )
     return fig
+
+
+def build_scenario_table(mc: dict, top_n: int = 12) -> str:
+    """
+    Return an HTML table of the top-N most probable Match 82 scenarios,
+    showing Group G winner, 3rd-place opponent, and joint probability.
+    """
+    pairs = sorted(mc["match82_joint_prob"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+    if not pairs: return ""
+    top_pct = pairs[0][1] * 100
+    rows = ""
+    for rank, ((gw, tp), prob) in enumerate(pairs, 1):
+        pct = prob * 100
+        bar_w = int((pct / top_pct) * 56) if top_pct else 0
+        gw_flag = FLAG_MAP.get(gw, "🏳️")
+        tp_flag = FLAG_MAP.get(tp, "🏳️")
+        rank_color = "#fbbf24" if rank == 1 else ("#94a3b8" if rank == 2 else ("#cd7f32" if rank == 3 else "#475569"))
+        rows += (
+            f'<tr style="border-bottom:1px solid #1e2235;">'
+            f'<td style="color:{rank_color};font-weight:700;padding:5px 8px;width:28px;'
+            f'font-family:monospace;">#{rank}</td>'
+            f'<td style="padding:5px 8px;">{gw_flag} <b>{gw}</b></td>'
+            f'<td style="padding:5px 8px;color:#64748b;">vs</td>'
+            f'<td style="padding:5px 8px;">{tp_flag} <b>{tp}</b></td>'
+            f'<td style="padding:5px 8px;font-family:monospace;color:#38bdf8;">'
+            f'<span style="display:inline-block;background:#0c2040;height:6px;'
+            f'width:{bar_w}px;border-radius:3px;margin-right:6px;vertical-align:middle;"></span>'
+            f'{pct:.1f}%</td>'
+            f'</tr>'
+        )
+    return (
+        '<table style="width:100%;border-collapse:collapse;font-size:0.82rem;color:#cbd5e1;">'
+        '<thead><tr style="border-bottom:1px solid #334155;">'
+        '<th style="padding:4px 8px;color:#64748b;text-align:left;"></th>'
+        '<th style="padding:4px 8px;color:#64748b;text-align:left;">Grp G Winner</th>'
+        '<th></th>'
+        '<th style="padding:4px 8px;color:#64748b;text-align:left;">3rd-Place Opp.</th>'
+        '<th style="padding:4px 8px;color:#64748b;text-align:left;">P(Match 82)</th>'
+        '</tr></thead>'
+        f'<tbody>{rows}</tbody></table>'
+    )
 
 
 def build_group_g_bar(mc: dict) -> go.Figure:
@@ -1819,6 +1956,47 @@ def render_sidebar() -> tuple[str, int, bool]:
         st.caption("**Elo base**: eloratings.net as of June 13, 2026")
         st.caption("**Elo updates**: K=60 applied after every WC result")
         st.caption("**Blend**: Dynamic — 0% mkt at MD0 → 60% mkt at MD3 (per group)")
+
+        # ── Locked outcomes panel ─────────────────────────────────────────
+        locked_outcomes = compute_locked_outcomes()
+        grp_g_lock = locked_outcomes.get("G", {})
+        any_locked = any(
+            locked_outcomes.get(g, {}).get("winner") or
+            locked_outcomes.get(g, {}).get("eliminated") or
+            locked_outcomes.get(g, {}).get("through")
+            for g in ["G"] + THIRD_PLACE_GROUPS
+        )
+        if any_locked:
+            st.divider()
+            st.markdown("### 🔐 Decided")
+            st.caption("Mathematically locked outcomes — MC clamps these.")
+            for grp in ["G"] + THIRD_PLACE_GROUPS:
+                gl = locked_outcomes.get(grp, {})
+                winner = gl.get("winner")
+                through = gl.get("through", [])
+                elim = gl.get("eliminated", [])
+                if not (winner or through or elim):
+                    continue
+                st.markdown(f"**Group {grp}**")
+                if winner:
+                    f = FLAG_MAP.get(winner, "🏳️")
+                    st.markdown(
+                        f'<span style="color:#4ade80;font-size:0.78rem;">'
+                        f'✅ {f} {winner} — group winner</span>',
+                        unsafe_allow_html=True)
+                for t in through:
+                    if t != winner:
+                        f = FLAG_MAP.get(t, "🏳️")
+                        st.markdown(
+                            f'<span style="color:#60a5fa;font-size:0.78rem;">'
+                            f'→ {f} {t} — through</span>',
+                            unsafe_allow_html=True)
+                for t in elim:
+                    f = FLAG_MAP.get(t, "🏳️")
+                    st.markdown(
+                        f'<span style="color:#f87171;font-size:0.78rem;">'
+                        f'❌ {f} {t} — eliminated</span>',
+                        unsafe_allow_html=True)
 
         st.divider()
         st.markdown("### 📊 Elo Shifts")
@@ -2492,12 +2670,19 @@ def main() -> None:
     
     st.markdown("---")
     
-    # ── HEATMAP + CHAOS GAUGE ───────────────────────────────────────────────────
+    # ── HEATMAP + SCENARIO TABLE + CHAOS GAUGE ──────────────────────────────────
     st.markdown("## 📊 Probability Analytics")
     col_heat, col_chaos = st.columns([2.2, 1])
-    
+
     with col_heat:
         st.plotly_chart(build_heatmap(mc), use_container_width=True)
+        st.markdown(
+            "<div style='font-size:0.75rem;color:#64748b;margin:-8px 0 4px;'>"
+            "Top 12 most probable Match 82 matchups — ranked by joint probability"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(build_scenario_table(mc, top_n=12), unsafe_allow_html=True)
     
     with col_chaos:
         st.markdown("#### Chaos Index")
