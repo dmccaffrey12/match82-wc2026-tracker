@@ -412,11 +412,16 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Sweden":       {"mp":2,"w":1,"d":0,"l":1,"gf":6,"ga":6},
     "Tunisia":      {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":9},
     # Group G — through MD2 (June 21 FINAL)
-    # Egypt: 3pts (+2 GD), Belgium: 2pts (0 GD), Iran: 2pts (0 GD), NZL: 0pts (-1 GD)
+    # MD1: BEL 1-1 EGY, IRA 2-2 NZL
+    # MD2: BEL 0-0 IRA, NZL 1-3 EGY
+    # Egypt:       4pts, GF=4 (1+3), GA=2 (1+1), GD=+2
+    # Belgium:     2pts, GF=1 (1+0), GA=1 (1+0), GD=0
+    # Iran:        2pts, GF=2 (2+0), GA=2 (2+0), GD=0
+    # New Zealand: 1pt,  GF=3 (2+1), GA=5 (2+3), GD=-2
     "Egypt":        {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":2},
     "Belgium":      {"mp":2,"w":0,"d":2,"l":0,"gf":1,"ga":1},
     "Iran":         {"mp":2,"w":0,"d":2,"l":0,"gf":2,"ga":2},
-    "New Zealand":  {"mp":2,"w":0,"d":1,"l":1,"gf":3,"ga":4},
+    "New Zealand":  {"mp":2,"w":0,"d":1,"l":1,"gf":3,"ga":5},
     # Group H — through MD2 (June 21 FINAL)
     # Spain: 4pts (+4 GD), Uruguay: 2pts (0 GD), Cabo Verde: 2pts (0 GD), KSA: 1pt (-4 GD)
     "Spain":        {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":0},
