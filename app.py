@@ -235,6 +235,13 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("Uruguay",     "Cabo Verde",    2, 2),   # URU 2-2 CPV  (Cape Verde's 1st WC goals)
 ]
 
+# Set of already-played fixtures as frozensets so simulate_group_stage
+# can skip them — results are already baked into LIVE_STANDINGS / the API.
+# Using frozenset so order doesn't matter (home/away is irrelevant here).
+PLAYED_FIXTURES: set[frozenset] = {
+    frozenset((h, a)) for h, a, _, _ in PLAYED_RESULTS
+}
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def compute_tournament_elos() -> dict[str, float]:
@@ -766,6 +773,9 @@ def simulate_group_stage(tables: dict, elo_ratings: dict[str, float] | None = No
     Returns: {group: {team: [pts, gf, ga, gd, w, d, l]}}
     """
     for (grp, home, away) in ALL_FIXTURES:
+        # Skip fixtures whose result is already in LIVE_STANDINGS
+        if frozenset((home, away)) in PLAYED_FIXTURES:
+            continue
         gh, ga = simulate_match(home, away, elo_ratings)
         t = tables[grp]
         # Home team
@@ -1096,9 +1106,11 @@ def compute_market_third_place_probs() -> dict[str, dict] | None:
         tables = {grp: {t: list(v) for t, v in grp_table.items()}
                   for grp, grp_table in base_tables.items()
                   if grp in THIRD_PLACE_GROUPS}
-        # Only simulate fixtures for THIRD_PLACE_GROUPS
+        # Only simulate fixtures for THIRD_PLACE_GROUPS, skipping played ones
         for (grp, home, away) in ALL_FIXTURES:
             if grp not in THIRD_PLACE_GROUPS:
+                continue
+            if frozenset((home, away)) in PLAYED_FIXTURES:
                 continue
             gh, ga = simulate_match(home, away, live_elos)
             t = tables[grp]
@@ -1344,7 +1356,10 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
                     # For teams likely to finish 1st/2nd, market price >> mc_p3q,
                     # which would overstate their 3rd-place prob — so cap the
                     # market signal at 2x the MC estimate.
-                    p_adv_capped = min(p_adv_mkt, max(mc_p3q * 2.0, 0.05))
+                    # Cap market signal at 2x MC to prevent 1st/2nd favorites
+                    # from inflating their 3rd-place prob. No floor — if the
+                    # market says 5% advance (Curaçao), don't manufacture signal.
+                    p_adv_capped = min(p_adv_mkt, mc_p3q * 2.0) if mc_p3q > 0 else p_adv_mkt
                     blended, method = blend_mc_with_market(mc_p3q, p_adv_capped, group=grp)
                     third_advance_prob[team] = blended
                     methods[team] = method
