@@ -1148,20 +1148,74 @@ def fetch_polymarket_3rd_place_probs() -> dict[str, float] | None:
     return None
 
 
-def blend_mc_with_market(mc_prob: float, market_prob: float | None, market_weight: float = 0.4) -> tuple[float, str]:
+# Maximum market weight when the group stage is fully complete (MD3 done).
+# At 0 games played: weight = 0 (pure Elo/MC).
+# After MD2 (4/6 games): weight = MAX_MARKET_WEIGHT * (4/6) ≈ 40%
+# After MD3 (6/6 games): weight = MAX_MARKET_WEIGHT * (6/6) = 60%
+MAX_MARKET_WEIGHT: float = 0.60
+
+
+def dynamic_market_weight(group: str) -> float:
+    """
+    Compute the market weight for a given group based on how many
+    group-stage games have been played.
+
+    Formula:  w = MAX_MARKET_WEIGHT * (games_played / total_games)
+
+    Total games per 4-team group = 6 (round-robin).
+    games_played is inferred from the average matches-played across
+    the four teams in LIVE_STANDINGS (each game increments two teams
+    by 1, so avg_mp == games_played).
+
+    Examples:
+      MD0 (no games): weight = 0.60 * 0/6 = 0.00  → pure MC/Elo
+      MD1 done:       weight = 0.60 * 2/6 = 0.20
+      MD2 done:       weight = 0.60 * 4/6 = 0.40
+      MD3 done:       weight = 0.60 * 6/6 = 0.60
+    """
+    teams = GROUPS.get(group, [])
+    if not teams:
+        return MAX_MARKET_WEIGHT
+    # Use LIVE_STANDINGS mp if available; fall back to 0
+    avg_mp = sum(
+        LIVE_STANDINGS.get(t, {}).get("mp", 0) for t in teams
+    ) / max(len(teams), 1)
+    # avg_mp == games played (each match adds 1 mp to each of 2 teams;
+    # summed over 4 teams and divided by 4 → games_played / 2; ×2 = games_played)
+    # Actually: total_mp_sum = 2 * games_played, avg_mp = games_played/2 * ... 
+    # Let's be explicit: sum of mp across all 4 teams = 2 * games_played
+    total_mp = sum(LIVE_STANDINGS.get(t, {}).get("mp", 0) for t in teams)
+    games_played = total_mp / 2  # each game adds 1 mp to 2 teams
+    total_games = 6  # 4-team round robin = C(4,2) = 6
+    frac = min(games_played / total_games, 1.0)
+    return MAX_MARKET_WEIGHT * frac
+
+
+def blend_mc_with_market(
+    mc_prob: float,
+    market_prob: float | None,
+    market_weight: float | None = None,
+    group: str | None = None,
+) -> tuple[float, str]:
     """
     Blend Monte Carlo probability with market-implied probability.
-    
-    We weight MC at 60% and market at 40% by default.
-    Rationale: MC is more principled for obscure teams; markets are better
-    for top teams where there's real liquidity and information aggregation.
-    
+
+    Weight is dynamic by default: scales with how much of the group
+    stage has been played (0% at MD0 → 60% at MD3 complete).
+    Pass an explicit market_weight to override, or a group name to
+    auto-compute the dynamic weight for that group.
+
     Returns: (blended_prob, method_label)
     """
     if market_prob is None:
         return mc_prob, "MC"
+    if market_weight is None:
+        market_weight = dynamic_market_weight(group) if group else MAX_MARKET_WEIGHT * 0.67
+    if market_weight <= 0:
+        return mc_prob, "MC"
     blended = (1 - market_weight) * mc_prob + market_weight * market_prob
-    return blended, "BLEND"
+    label = "BLEND" if market_weight < 0.95 else "MKT"
+    return blended, label
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1257,7 +1311,7 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
         if mkt_g:
             for team in GROUPS["G"]:
                 mkt_p = mkt_g.get(team)
-                blended, method = blend_mc_with_market(g_winner_prob[team], mkt_p)
+                blended, method = blend_mc_with_market(g_winner_prob[team], mkt_p, group="G")
                 g_winner_prob[team] = blended
                 methods[team] = method
             # Re-normalize Group G winner probs after blend
@@ -1291,7 +1345,7 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
                     # which would overstate their 3rd-place prob — so cap the
                     # market signal at 2x the MC estimate.
                     p_adv_capped = min(p_adv_mkt, max(mc_p3q * 2.0, 0.05))
-                    blended, method = blend_mc_with_market(mc_p3q, p_adv_capped)
+                    blended, method = blend_mc_with_market(mc_p3q, p_adv_capped, group=grp)
                     third_advance_prob[team] = blended
                     methods[team] = method
 
@@ -1712,7 +1766,16 @@ def render_sidebar() -> tuple[str, int, bool]:
         )
         
         if use_markets:
-            st.caption("60% MC + 40% market for teams with active Polymarket contracts.")
+            # Show per-group dynamic weights so user can see how trust shifts
+            g_w  = dynamic_market_weight("G")
+            # Show a representative 3rd-place group weight (use the most-played one)
+            tp_w = max(dynamic_market_weight(grp) for grp in THIRD_PLACE_GROUPS)
+            st.caption(
+                f"**Dynamic blend** — scales with games played.  \n"
+                f"Group G: **{g_w*100:.0f}%** mkt / {(1-g_w)*100:.0f}% MC  \n"
+                f"3rd-place groups: up to **{tp_w*100:.0f}%** mkt / {(1-tp_w)*100:.0f}% MC  \n"
+                f"_(reaches 60% mkt when MD3 completes)_"
+            )
         
         if st.button("🔄 Re-run Simulation", use_container_width=True):
             st.cache_data.clear()
@@ -1735,7 +1798,7 @@ def render_sidebar() -> tuple[str, int, bool]:
         st.caption("**3rd-place**: Full 12-group race, not independent per-team probs")
         st.caption("**Elo base**: eloratings.net as of June 13, 2026")
         st.caption("**Elo updates**: K=60 applied after every WC result")
-        st.caption("**Blend**: Polymarket API (no key required, free)")
+        st.caption("**Blend**: Dynamic — 0% mkt at MD0 → 60% mkt at MD3 (per group)")
 
         st.divider()
         st.markdown("### 📊 Elo Shifts")
