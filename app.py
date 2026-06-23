@@ -233,6 +233,11 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("New Zealand", "Egypt",         1, 3),   # NZL 1-3 EGY  (Egypt top of Group G)
     ("Spain",       "Saudi Arabia",  4, 0),   # ESP 4-0 KSA  (Yamal's 1st WC goal)
     ("Uruguay",     "Cabo Verde",    2, 2),   # URU 2-2 CPV  (Cape Verde's 1st WC goals)
+    # Matchday 2 — June 22 (FINAL)
+    ("France",      "Iraq",          3, 0),   # FRA 3-0 IRQ  (Mbappé brace, Dembélé; France through)
+    ("Norway",      "Senegal",       3, 2),   # NOR 3-2 SEN  (Haaland brace; Norway through)
+    ("Argentina",   "Austria",       2, 0),   # ARG 2-0 AUT  (Messi record brace; Argentina through)
+    ("Jordan",      "Algeria",       1, 2),   # JOR 1-2 ALG  (Benbouali 69', Gouiri 82')
 ]
 
 # Set of already-played fixtures as frozensets so simulate_group_stage
@@ -428,16 +433,16 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Uruguay":      {"mp":2,"w":0,"d":2,"l":0,"gf":3,"ga":3},
     "Cabo Verde":   {"mp":2,"w":0,"d":2,"l":0,"gf":2,"ga":2},
     "Saudi Arabia": {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":5},
-    # Group I — MD1: Fra 3-1 Sen, Nor 4-1 Iraq (MD2 June 22)
-    "France":       {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
-    "Norway":       {"mp":1,"w":1,"d":0,"l":0,"gf":4,"ga":1},
-    "Senegal":      {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":3},
-    "Iraq":         {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":4},
-    # Group J — MD1: Arg 3-0 Alg, Aut 3-1 Jor (MD2 June 22)
-    "Argentina":    {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":0},
-    "Austria":      {"mp":1,"w":1,"d":0,"l":0,"gf":3,"ga":1},
-    "Jordan":       {"mp":1,"w":0,"d":0,"l":1,"gf":1,"ga":3},
-    "Algeria":      {"mp":1,"w":0,"d":0,"l":1,"gf":0,"ga":3},
+    # Group I — MD2 FINAL: Fra 3-0 Irq, Nor 3-2 Sen
+    "France":       {"mp":2,"w":2,"d":0,"l":0,"gf":6,"ga":1},
+    "Norway":       {"mp":2,"w":2,"d":0,"l":0,"gf":7,"ga":3},
+    "Senegal":      {"mp":2,"w":0,"d":0,"l":2,"gf":3,"ga":6},
+    "Iraq":         {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":7},
+    # Group J — MD2 FINAL: Arg 2-0 Aut, Jor 1-2 Alg
+    "Argentina":    {"mp":2,"w":2,"d":0,"l":0,"gf":5,"ga":0},
+    "Austria":      {"mp":2,"w":1,"d":0,"l":1,"gf":3,"ga":3},
+    "Algeria":      {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":4},
+    "Jordan":       {"mp":2,"w":0,"d":0,"l":2,"gf":2,"ga":5},
     "Portugal":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
     "Colombia":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
     "Uzbekistan":   {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
