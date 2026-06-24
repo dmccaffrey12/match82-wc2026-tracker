@@ -238,6 +238,11 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("Norway",      "Senegal",       3, 2),   # NOR 3-2 SEN  (Haaland brace; Norway through)
     ("Argentina",   "Austria",       2, 0),   # ARG 2-0 AUT  (Messi record brace; Argentina through)
     ("Jordan",      "Algeria",       1, 2),   # JOR 1-2 ALG  (Benbouali 69', Gouiri 82')
+    # Matchday 2 — June 23 (FINAL)
+    ("Portugal",    "Uzbekistan",    5, 0),   # POR 5-0 UZB  (Ronaldo brace; Portugal through)
+    ("Colombia",    "DR Congo",      1, 0),   # COL 1-0 DRC  (Muñoz 76'; Colombia through)
+    ("England",     "Ghana",         0, 0),   # ENG 0-0 GHA  (England held)
+    ("Panama",      "Croatia",       0, 1),   # PAN 0-1 CRO  (Budimir)
 ]
 
 # Set of already-played fixtures as frozensets so simulate_group_stage
@@ -443,14 +448,16 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Austria":      {"mp":2,"w":1,"d":0,"l":1,"gf":3,"ga":3},
     "Algeria":      {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":4},
     "Jordan":       {"mp":2,"w":0,"d":0,"l":2,"gf":2,"ga":5},
-    "Portugal":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Colombia":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Uzbekistan":   {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "DR Congo":     {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "England":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Croatia":      {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Ghana":        {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
-    "Panama":       {"mp":0,"w":0,"d":0,"l":0,"gf":0,"ga":0},
+    # Group K — MD2 FINAL: Por 5-0 Uzb, Col 1-0 DRC
+    "Portugal":     {"mp":2,"w":1,"d":1,"l":0,"gf":6,"ga":1},
+    "Colombia":     {"mp":2,"w":2,"d":0,"l":0,"gf":4,"ga":1},
+    "Uzbekistan":   {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":8},
+    "DR Congo":     {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":2},
+    # Group L — MD2 FINAL: Eng 0-0 Gha, Pan 0-1 Cro
+    "England":      {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":2},
+    "Ghana":        {"mp":2,"w":1,"d":1,"l":0,"gf":1,"ga":0},
+    "Croatia":      {"mp":2,"w":1,"d":0,"l":1,"gf":3,"ga":4},
+    "Panama":       {"mp":2,"w":0,"d":0,"l":2,"gf":0,"ga":2},
 }
 
 # Full fixture list for all 12 groups (only unplayed remaining matches needed)
