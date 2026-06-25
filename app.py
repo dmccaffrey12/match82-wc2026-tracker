@@ -243,6 +243,13 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("Colombia",    "DR Congo",      1, 0),   # COL 1-0 DRC  (Muñoz 76'; Colombia through)
     ("England",     "Ghana",         0, 0),   # ENG 0-0 GHA  (England held)
     ("Panama",      "Croatia",       0, 1),   # PAN 0-1 CRO  (Budimir)
+    # Matchday 3 — June 24 (FINAL)
+    ("South Africa", "South Korea",  1, 0),   # SAF 1-0 KOR  (Group A shock; South Africa 2nd)
+    ("Czechia",      "Mexico",       0, 3),   # CZE 0-3 MEX  (Mexico perfect record, 9pts)
+    ("Switzerland",  "Canada",       2, 1),   # SUI 2-1 CAN  (Switzerland Group B winners)
+    ("Bosnia",       "Qatar",        3, 1),   # BOS 3-1 QAT  (Bosnia strong 3rd-place candidate)
+    ("Scotland",     "Brazil",       0, 3),   # SCO 0-3 BRA  (Brazil through, Group C winners)
+    ("Morocco",      "Haiti",        4, 2),   # MOR 4-2 HAI  (Morocco 2nd in Group C)
 ]
 
 # Set of already-played fixtures as frozensets so simulate_group_stage
@@ -392,20 +399,21 @@ def fetch_standings_from_api() -> dict[str, dict] | None:
 # ── Hardcoded fallback standings (updated manually if no Sheet is configured) ─
 LIVE_STANDINGS: dict[str, dict] = {
     # Group A — MD1: Mexico 2-0 RSA, SKor 2-1 CZE | MD2: CZE 1-1 RSA, Mexico 1-0 SKor
-    "Mexico":       {"mp":2,"w":2,"d":0,"l":0,"gf":3,"ga":0},
-    "South Korea":  {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
-    "Czechia":      {"mp":2,"w":0,"d":1,"l":1,"gf":2,"ga":3},
-    "South Africa": {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":3},
-    # Group B — MD1: Can 1-1 Bos, Qat 1-1 Swi | MD2: Swi 4-1 Bos, Can 6-0 Qat
-    "Switzerland":  {"mp":2,"w":1,"d":1,"l":0,"gf":5,"ga":2},
-    "Canada":       {"mp":2,"w":1,"d":1,"l":0,"gf":7,"ga":1},
-    "Qatar":        {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":7},
-    "Bosnia":       {"mp":2,"w":0,"d":1,"l":1,"gf":2,"ga":5},
-    # Group C — MD1: Sco 1-0 Hai, Bra 1-1 Mor | MD2: Mor 1-0 Sco, Bra 3-0 Hai
-    "Scotland":     {"mp":2,"w":1,"d":0,"l":1,"gf":1,"ga":1},
-    "Morocco":      {"mp":2,"w":1,"d":1,"l":0,"gf":2,"ga":1},
-    "Brazil":       {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":1},
-    "Haiti":        {"mp":2,"w":0,"d":0,"l":2,"gf":0,"ga":4},
+    # Group A — MD3 FINAL: SAF 1-0 KOR, CZE 0-3 MEX
+    "Mexico":       {"mp":3,"w":3,"d":0,"l":0,"gf":7,"ga":0},
+    "South Africa": {"mp":3,"w":1,"d":1,"l":1,"gf":2,"ga":4},
+    "South Korea":  {"mp":3,"w":1,"d":0,"l":2,"gf":2,"ga":3},
+    "Czechia":      {"mp":3,"w":0,"d":1,"l":2,"gf":2,"ga":6},
+    # Group B — MD3 FINAL: Swi 2-1 Can, Bos 3-1 Qat
+    "Switzerland":  {"mp":3,"w":2,"d":1,"l":0,"gf":7,"ga":3},
+    "Canada":       {"mp":3,"w":1,"d":1,"l":1,"gf":8,"ga":3},
+    "Bosnia":       {"mp":3,"w":1,"d":1,"l":1,"gf":5,"ga":6},
+    "Qatar":        {"mp":3,"w":0,"d":1,"l":2,"gf":2,"ga":10},
+    # Group C — MD3 FINAL: Sco 0-3 Bra, Mor 4-2 Hai
+    "Brazil":       {"mp":3,"w":2,"d":1,"l":0,"gf":7,"ga":1},
+    "Morocco":      {"mp":3,"w":2,"d":1,"l":0,"gf":6,"ga":3},
+    "Scotland":     {"mp":3,"w":1,"d":0,"l":2,"gf":1,"ga":4},
+    "Haiti":        {"mp":3,"w":0,"d":0,"l":3,"gf":2,"ga":8},
     # Group D — MD1: USA 4-1 Par, Aus 2-0 Tur | MD2: USA 2-0 Aus, Par 1-0 Tur
     "USA":          {"mp":2,"w":2,"d":0,"l":0,"gf":6,"ga":1},
     "Australia":    {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
