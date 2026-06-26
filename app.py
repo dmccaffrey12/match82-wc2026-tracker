@@ -250,6 +250,13 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("Bosnia",       "Qatar",        3, 1),   # BOS 3-1 QAT  (Bosnia strong 3rd-place candidate)
     ("Scotland",     "Brazil",       0, 3),   # SCO 0-3 BRA  (Brazil through, Group C winners)
     ("Morocco",      "Haiti",        4, 2),   # MOR 4-2 HAI  (Morocco 2nd in Group C)
+    # Matchday 3 — June 25 (FINAL)
+    ("Curaçao",      "Côte d'Ivoire", 0, 2),   # CUR 0-2 CIV  (CIV through)
+    ("Ecuador",      "Germany",       2, 1),   # ECU 2-1 GER  (huge upset; Ger GD wins group)
+    ("Tunisia",      "Netherlands",   1, 3),   # TUN 1-3 NED  (Netherlands through, Group F winners)
+    ("Japan",        "Sweden",        1, 1),   # JPN 1-1 SWE  (Japan 2nd on pts)
+    ("Paraguay",     "Australia",     0, 0),   # PAR 0-0 AUS  (Australia 2nd on GD)
+    ("Türkiye",      "USA",           3, 2),   # TUR 3-2 USA  (shock; USA still 1st on pts)
 ]
 
 # Set of already-played fixtures as frozensets so simulate_group_stage
@@ -414,21 +421,21 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Morocco":      {"mp":3,"w":2,"d":1,"l":0,"gf":6,"ga":3},
     "Scotland":     {"mp":3,"w":1,"d":0,"l":2,"gf":1,"ga":4},
     "Haiti":        {"mp":3,"w":0,"d":0,"l":3,"gf":2,"ga":8},
-    # Group D — MD1: USA 4-1 Par, Aus 2-0 Tur | MD2: USA 2-0 Aus, Par 1-0 Tur
-    "USA":          {"mp":2,"w":2,"d":0,"l":0,"gf":6,"ga":1},
-    "Australia":    {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
-    "Türkiye":      {"mp":2,"w":0,"d":0,"l":2,"gf":0,"ga":3},
-    "Paraguay":     {"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":4},
-    # Group E — MD1: Ger 7-1 Cur, CIV 1-0 Ecu | MD2: Ger 2-1 CIV, Ecu 0-0 Cur
-    "Germany":      {"mp":2,"w":2,"d":0,"l":0,"gf":9,"ga":2},
-    "Côte d'Ivoire":{"mp":2,"w":1,"d":0,"l":1,"gf":2,"ga":2},
-    "Ecuador":      {"mp":2,"w":0,"d":1,"l":1,"gf":0,"ga":1},
-    "Curaçao":      {"mp":2,"w":0,"d":1,"l":1,"gf":2,"ga":8},
-    # Group F — MD1: Ned 2-2 Jpn, Swe 5-1 Tun | MD2: Ned 5-1 Swe, Jpn 4-0 Tun
-    "Netherlands":  {"mp":2,"w":1,"d":1,"l":0,"gf":7,"ga":3},
-    "Japan":        {"mp":2,"w":1,"d":1,"l":0,"gf":6,"ga":2},
-    "Sweden":       {"mp":2,"w":1,"d":0,"l":1,"gf":6,"ga":6},
-    "Tunisia":      {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":9},
+    # Group D — MD3 FINAL: Par 0-0 Aus, Tur 3-2 USA
+    "USA":          {"mp":3,"w":2,"d":0,"l":1,"gf":8,"ga":4},
+    "Australia":    {"mp":3,"w":1,"d":1,"l":1,"gf":2,"ga":2},
+    "Paraguay":     {"mp":3,"w":1,"d":1,"l":1,"gf":2,"ga":4},
+    "Türkiye":      {"mp":3,"w":1,"d":0,"l":2,"gf":3,"ga":5},
+    # Group E — MD3 FINAL: Cur 0-2 CIV, Ecu 2-1 Ger
+    "Germany":      {"mp":3,"w":2,"d":0,"l":1,"gf":10,"ga":4},
+    "Côte d'Ivoire":{"mp":3,"w":2,"d":0,"l":1,"gf":4,"ga":2},
+    "Ecuador":      {"mp":3,"w":1,"d":1,"l":1,"gf":2,"ga":2},
+    "Curaçao":      {"mp":3,"w":0,"d":1,"l":2,"gf":1,"ga":9},
+    # Group F — MD3 FINAL: Tun 1-3 Ned, Jpn 1-1 Swe
+    "Netherlands":  {"mp":3,"w":2,"d":1,"l":0,"gf":10,"ga":4},
+    "Japan":        {"mp":3,"w":1,"d":2,"l":0,"gf":7,"ga":3},
+    "Sweden":       {"mp":3,"w":1,"d":1,"l":1,"gf":7,"ga":7},
+    "Tunisia":      {"mp":3,"w":0,"d":0,"l":3,"gf":2,"ga":12},
     # Group G — through MD2 (June 21 FINAL)
     # MD1: BEL 1-1 EGY, IRA 2-2 NZL
     # MD2: BEL 0-0 IRA, NZL 1-3 EGY
