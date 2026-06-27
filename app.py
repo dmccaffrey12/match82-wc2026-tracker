@@ -1326,6 +1326,33 @@ def compute_locked_outcomes() -> dict[str, dict[str, str]]:
     return locked
 
 
+# ── FIFA 495-combination routing table for Match 82 (hoisted for performance) ─────
+# Key = frozenset of 8 qualifying third-place groups; value = group whose 3rd-placer
+# is routed to Match 82 (Group G winner vs 3rd place A/E/H/I/J, Seattle July 1).
+# Source: Annex C of FIFA 2026 regulations / Wikipedia 2026 knockout stage table.
+# Only 8 of 495 combinations remain possible after Sweden(F)/Bosnia(B)/Paraguay(D)/
+# Ecuador(E) locked into the top-8 third-place slots.
+# Ecuador (E) routes to OTHER matches — never to Match 82.
+MATCH82_ROUTING: dict[frozenset, str] = {
+    # combo 67:  {B,D,E,F,I,J,K,L} -> 1G = 3I
+    frozenset(["B","D","E","F","I","J","K","L"]): "I",
+    # combo 73:  {B,D,E,F,G,I,K,L} -> 1G = 3I
+    frozenset(["B","D","E","F","G","I","K","L"]): "I",
+    # combo 74:  {B,D,E,F,G,I,J,L} -> 1G = 3J
+    frozenset(["B","D","E","F","G","I","J","L"]): "J",
+    # combo 75:  {B,D,E,F,G,I,J,K} -> 1G = 3J
+    frozenset(["B","D","E","F","G","I","J","K"]): "J",
+    # combo 363: {A,B,D,E,F,G,I,L} -> 1G = 3A
+    frozenset(["A","B","D","E","F","G","I","L"]): "A",
+    # combo 364: {A,B,D,E,F,G,I,K} -> 1G = 3A
+    frozenset(["A","B","D","E","F","G","I","K"]): "A",
+    # combo 365: {A,B,D,E,F,G,I,J} -> 1G = 3A
+    frozenset(["A","B","D","E","F","G","I","J"]): "A",
+    # combo 494: {A,B,C,D,E,F,G,I} -> 1G = 3A
+    frozenset(["A","B","C","D","E","F","G","I"]): "A",
+}
+
+
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
 def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> dict:
     """
@@ -1413,14 +1440,23 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
         for t, _, _ in advancing_thirds:
             third_advance_counts[t] += 1
         
-        # Who from eligible groups (A/E/H/I/J) is the 3rd-place qualifier?
-        eligible_advancing = [(t, grp) for t, grp, _ in advancing_thirds
-                              if grp in THIRD_PLACE_GROUPS]
-        
-        # Match 82: Group G winner vs. the eligible 3rd-place qualifier
-        for third_team, _ in eligible_advancing:
-            key = (g_winner, third_team)
-            match82_counts[key] = match82_counts.get(key, 0) + 1
+        # ── FIFA 495-combination routing table for Match 82 ─────────────────
+        # Key = frozenset of 8 qualifying third-place groups; value = which group's
+        # 3rd-placer is routed to Match 82 (Group G winner slot).
+        # Source: Annex C of FIFA 2026 regulations, Wikipedia knockout stage table.
+        # Only 8 of 495 combinations remain possible (Sweden/B/D/E locked in top-8).
+        # Ecuador (E) is already through but routes to OTHER matches — NOT Match 82.
+        # Determine qualifying groups from this simulation's top-8 third-place teams
+        qualifying_groups = frozenset(grp for _, grp, _ in advancing_thirds)
+        match82_third_group = MATCH82_ROUTING.get(qualifying_groups)
+        if match82_third_group is not None:
+            # Find the actual team from that group in the advancing thirds
+            for third_team, grp, _ in advancing_thirds:
+                if grp == match82_third_group:
+                    key = (g_winner, third_team)
+                    match82_counts[key] = match82_counts.get(key, 0) + 1
+                    break
+        # If no routing found (combination not in still-possible set), skip this sim
     
     # Convert counts to probabilities
     g_winner_prob   = {t: c / n_sims for t, c in g_winner_counts.items()}
