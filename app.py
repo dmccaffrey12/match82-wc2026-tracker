@@ -257,6 +257,13 @@ PLAYED_RESULTS: list[tuple[str, str, int, int]] = [
     ("Japan",        "Sweden",        1, 1),   # JPN 1-1 SWE  (Japan 2nd on pts)
     ("Paraguay",     "Australia",     0, 0),   # PAR 0-0 AUS  (Australia 2nd on GD)
     ("Türkiye",      "USA",           3, 2),   # TUR 3-2 USA  (shock; USA still 1st on pts)
+    # Matchday 3 — June 26 (FINAL)
+    ("New Zealand", "Belgium",       1, 5),   # NZL 1-5 BEL  (Belgium wins Group G)
+    ("Egypt",       "Iran",          1, 1),   # EGY 1-1 IRA  (Egypt 2nd on GD)
+    ("Uruguay",     "Spain",         0, 1),   # URU 0-1 ESP  (Spain wins Group H)
+    ("Cabo Verde",  "Saudi Arabia",  0, 0),   # CPV 0-0 KSA  (Cabo Verde 2nd on GD)
+    ("Norway",      "France",        1, 4),   # NOR 1-4 FRA  (France wins Group I; Haaland rested)
+    ("Senegal",     "Iraq",          5, 0),   # SEN 5-0 IRQ  (Senegal 3rd)
 ]
 
 # Set of already-played fixtures as frozensets so simulate_group_stage
@@ -436,28 +443,21 @@ LIVE_STANDINGS: dict[str, dict] = {
     "Japan":        {"mp":3,"w":1,"d":2,"l":0,"gf":7,"ga":3},
     "Sweden":       {"mp":3,"w":1,"d":1,"l":1,"gf":7,"ga":7},
     "Tunisia":      {"mp":3,"w":0,"d":0,"l":3,"gf":2,"ga":12},
-    # Group G — through MD2 (June 21 FINAL)
-    # MD1: BEL 1-1 EGY, IRA 2-2 NZL
-    # MD2: BEL 0-0 IRA, NZL 1-3 EGY
-    # Egypt:       4pts, GF=4 (1+3), GA=2 (1+1), GD=+2
-    # Belgium:     2pts, GF=1 (1+0), GA=1 (1+0), GD=0
-    # Iran:        2pts, GF=2 (2+0), GA=2 (2+0), GD=0
-    # New Zealand: 1pt,  GF=3 (2+1), GA=5 (2+3), GD=-2
-    "Egypt":        {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":2},
-    "Belgium":      {"mp":2,"w":0,"d":2,"l":0,"gf":1,"ga":1},
-    "Iran":         {"mp":2,"w":0,"d":2,"l":0,"gf":2,"ga":2},
-    "New Zealand":  {"mp":2,"w":0,"d":1,"l":1,"gf":3,"ga":5},
-    # Group H — through MD2 (June 21 FINAL)
-    # Spain: 4pts (+4 GD), Uruguay: 2pts (0 GD), Cabo Verde: 2pts (0 GD), KSA: 1pt (-4 GD)
-    "Spain":        {"mp":2,"w":1,"d":1,"l":0,"gf":4,"ga":0},
-    "Uruguay":      {"mp":2,"w":0,"d":2,"l":0,"gf":3,"ga":3},
-    "Cabo Verde":   {"mp":2,"w":0,"d":2,"l":0,"gf":2,"ga":2},
-    "Saudi Arabia": {"mp":2,"w":0,"d":1,"l":1,"gf":1,"ga":5},
-    # Group I — MD2 FINAL: Fra 3-0 Irq, Nor 3-2 Sen
-    "France":       {"mp":2,"w":2,"d":0,"l":0,"gf":6,"ga":1},
-    "Norway":       {"mp":2,"w":2,"d":0,"l":0,"gf":7,"ga":3},
-    "Senegal":      {"mp":2,"w":0,"d":0,"l":2,"gf":3,"ga":6},
-    "Iraq":         {"mp":2,"w":0,"d":0,"l":2,"gf":1,"ga":7},
+    # Group G — MD3 FINAL: NZL 1-5 BEL, EGY 1-1 IRA
+    "Belgium":      {"mp":3,"w":1,"d":2,"l":0,"gf":6,"ga":2},
+    "Egypt":        {"mp":3,"w":1,"d":2,"l":0,"gf":5,"ga":3},
+    "Iran":         {"mp":3,"w":0,"d":3,"l":0,"gf":3,"ga":3},
+    "New Zealand":  {"mp":3,"w":0,"d":1,"l":2,"gf":4,"ga":10},
+    # Group H — MD3 FINAL: Uru 0-1 Esp, CPV 0-0 KSA
+    "Spain":        {"mp":3,"w":2,"d":1,"l":0,"gf":5,"ga":0},
+    "Cabo Verde":   {"mp":3,"w":0,"d":3,"l":0,"gf":2,"ga":2},
+    "Uruguay":      {"mp":3,"w":0,"d":2,"l":1,"gf":3,"ga":4},
+    "Saudi Arabia": {"mp":3,"w":0,"d":2,"l":1,"gf":1,"ga":5},
+    # Group I — MD3 FINAL: Nor 1-4 Fra, Sen 5-0 Irq
+    "France":       {"mp":3,"w":3,"d":0,"l":0,"gf":10,"ga":2},
+    "Norway":       {"mp":3,"w":2,"d":0,"l":1,"gf":8,"ga":7},
+    "Senegal":      {"mp":3,"w":1,"d":0,"l":2,"gf":8,"ga":6},
+    "Iraq":         {"mp":3,"w":0,"d":0,"l":3,"gf":1,"ga":12},
     # Group J — MD2 FINAL: Arg 2-0 Aut, Jor 1-2 Alg
     "Argentina":    {"mp":2,"w":2,"d":0,"l":0,"gf":5,"ga":0},
     "Austria":      {"mp":2,"w":1,"d":0,"l":1,"gf":3,"ga":3},
