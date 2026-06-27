@@ -1330,26 +1330,32 @@ def compute_locked_outcomes() -> dict[str, dict[str, str]]:
 # Key = frozenset of 8 qualifying third-place groups; value = group whose 3rd-placer
 # is routed to Match 82 (Group G winner vs 3rd place A/E/H/I/J, Seattle July 1).
 # Source: Annex C of FIFA 2026 regulations / Wikipedia 2026 knockout stage table.
-# Only 8 of 495 combinations remain possible after Sweden(F)/Bosnia(B)/Paraguay(D)/
-# Ecuador(E) locked into the top-8 third-place slots.
-# Ecuador (E) routes to OTHER matches — never to Match 82.
+# Complete routing table — all 10 possible qualifying-group combinations after
+# Groups A-I are final (Sweden/B/D/E locked top-4; remaining 4 slots drawn from
+# {A,C,G,I,J,L} with exactly 3 more needed beyond the locked {B,D,E,F}).
+# Stale entries referencing K (Uzbekistan/DR Congo) have been removed.
+# Source: FIFA Annex C / Wikipedia 2026 knockout stage 495-row table.
 MATCH82_ROUTING: dict[frozenset, str] = {
-    # combo 67:  {B,D,E,F,I,J,K,L} -> 1G = 3I
-    frozenset(["B","D","E","F","I","J","K","L"]): "I",
-    # combo 73:  {B,D,E,F,G,I,K,L} -> 1G = 3I
-    frozenset(["B","D","E","F","G","I","K","L"]): "I",
-    # combo 74:  {B,D,E,F,G,I,J,L} -> 1G = 3J
-    frozenset(["B","D","E","F","G","I","J","L"]): "J",
-    # combo 75:  {B,D,E,F,G,I,J,K} -> 1G = 3J
-    frozenset(["B","D","E","F","G","I","J","K"]): "J",
-    # combo 363: {A,B,D,E,F,G,I,L} -> 1G = 3A
-    frozenset(["A","B","D","E","F","G","I","L"]): "A",
-    # combo 364: {A,B,D,E,F,G,I,K} -> 1G = 3A
-    frozenset(["A","B","D","E","F","G","I","K"]): "A",
-    # combo 365: {A,B,D,E,F,G,I,J} -> 1G = 3A
-    frozenset(["A","B","D","E","F","G","I","J"]): "A",
     # combo 494: {A,B,C,D,E,F,G,I} -> 1G = 3A
     frozenset(["A","B","C","D","E","F","G","I"]): "A",
+    # combo 486: {A,B,C,D,E,F,I,J} -> 1G = 3A
+    frozenset(["A","B","C","D","E","F","I","J"]): "A",
+    # combo 484: {A,B,C,D,E,F,I,L} -> 1G = 3A
+    frozenset(["A","B","C","D","E","F","I","L"]): "A",
+    # combo 365: {A,B,D,E,F,G,I,J} -> 1G = 3A
+    frozenset(["A","B","D","E","F","G","I","J"]): "A",
+    # combo 363: {A,B,D,E,F,G,I,L} -> 1G = 3A
+    frozenset(["A","B","D","E","F","G","I","L"]): "A",
+    # combo 352: {A,B,D,E,F,I,J,L} -> 1G = 3A
+    frozenset(["A","B","D","E","F","I","J","L"]): "A",
+    # combo 161: {B,C,D,E,F,G,I,J} -> 1G = 3J
+    frozenset(["B","C","D","E","F","G","I","J"]): "J",
+    # combo 159: {B,C,D,E,F,G,I,L} -> 1G = 3E  (Ecuador — rare but valid)
+    frozenset(["B","C","D","E","F","G","I","L"]): "E",
+    # combo 148: {B,C,D,E,F,I,J,L} -> 1G = 3E  (Ecuador — rare but valid)
+    frozenset(["B","C","D","E","F","I","J","L"]): "E",
+    # combo 74:  {B,D,E,F,G,I,J,L} -> 1G = 3J
+    frozenset(["B","D","E","F","G","I","J","L"]): "J",
 }
 
 
@@ -1444,8 +1450,7 @@ def run_monte_carlo(n_sims: int = N_SIMULATIONS, use_markets: bool = False) -> d
         # Key = frozenset of 8 qualifying third-place groups; value = which group's
         # 3rd-placer is routed to Match 82 (Group G winner slot).
         # Source: Annex C of FIFA 2026 regulations, Wikipedia knockout stage table.
-        # Only 8 of 495 combinations remain possible (Sweden/B/D/E locked in top-8).
-        # Ecuador (E) is already through but routes to OTHER matches — NOT Match 82.
+        # 10 possible combos remain after Groups A-I finalized. Ecuador valid in 2 of 10.
         # Determine qualifying groups from this simulation's top-8 third-place teams
         qualifying_groups = frozenset(grp for _, grp, _ in advancing_thirds)
         match82_third_group = MATCH82_ROUTING.get(qualifying_groups)
