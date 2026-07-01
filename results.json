@@ -13,7 +13,7 @@
   },
   "third_advance_prob": {
     "Mexico": 0.0,
-    "South Korea": 0.61176,
+    "South Korea": 0.61308,
     "Czechia": 0.0,
     "South Africa": 0.0,
     "Switzerland": 0.0,
@@ -49,13 +49,13 @@
     "Norway": 0.0,
     "Iraq": 0.0,
     "Argentina": 0.0,
-    "Algeria": 0.64516,
-    "Austria": 0.35484,
+    "Algeria": 0.64928,
+    "Austria": 0.35072,
     "Jordan": 0.0,
     "Portugal": 0.0,
     "Colombia": 0.0,
     "Uzbekistan": 0.0,
-    "DR Congo": 0.38824,
+    "DR Congo": 0.38692,
     "England": 0.0,
     "Croatia": 0.0,
     "Ghana": 1.0,
@@ -64,6 +64,6 @@
   "match82_joint_prob": {},
   "methods": {},
   "n_sims": 50000,
-  "timestamp": 1782836690.3606677,
-  "computed_at": "2026-06-30T16:24:50.360770Z"
+  "timestamp": 1782923404.4269276,
+  "computed_at": "2026-07-01T16:30:04.427057Z"
 }
